@@ -11,7 +11,7 @@ struct AutoPresenterApp: App {
     init() {
         let appSettings = AppSettings()
         _settings = StateObject(wrappedValue: appSettings)
-        _viewModel = StateObject(wrappedValue: AppViewModel(settings: appSettings, bootstrapExampleDeck: false))
+        _viewModel = StateObject(wrappedValue: AppViewModel(settings: appSettings))
 
         NSWindow.allowsAutomaticWindowTabbing = false
         UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")

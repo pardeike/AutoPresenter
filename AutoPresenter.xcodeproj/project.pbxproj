@@ -15,8 +15,10 @@
 		551BE548B142CB557E79D082 /* AutoPresenterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36DD5B940AF001B29F7255BD /* AutoPresenterApp.swift */; };
 		6AB8DE148E687B5F99CB472E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA022A25C7397D5E115B8FB6 /* ContentView.swift */; };
 		AD75C40EDDA503CF25CE436D /* SlideImageSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 221EAF5F9A80AC24BFD638D4 /* SlideImageSupport.swift */; };
+		B1C100028812D982AD1AB83B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E94F61B283AE978974437000 /* Assets.xcassets */; };
 		B4BA98B62F729709AB864C68 /* OpenAIRealtimeTokenService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */; };
 		BA2CD4FB57663ED8280DED08 /* RealtimeWebViewHostWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B02E142139BA6EC384AD2E7A /* RealtimeWebViewHostWindow.swift */; };
+		C1387DA3D9281F311A119A1D /* realtime-bridge.js in Resources */ = {isa = PBXBuildFile; fileRef = 6CA35DD1BA8EDF0D7DCFD10B /* realtime-bridge.js */; };
 		C5CA1CC93AD0671333AC73A2 /* RealtimeWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 979151427032FD08DB4317BB /* RealtimeWebView.swift */; };
 		D11959C722627409D682A8C1 /* CommandSafetyGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */; };
 		D93474E9906732722F208D66 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56BEB7603582D39D2FC92F4F /* AppSettings.swift */; };
@@ -31,6 +33,7 @@
 		3A64E77C8CFD8521357D15B6 /* SlideCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideCommand.swift; sourceTree = "<group>"; };
 		56BEB7603582D39D2FC92F4F /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		673814A6B3F6AF99F63CE46C /* RealtimeWebBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeWebBridge.swift; sourceTree = "<group>"; };
+		6CA35DD1BA8EDF0D7DCFD10B /* realtime-bridge.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "realtime-bridge.js"; sourceTree = "<group>"; };
 		7A7DDDD6F6CA2184B45FABAD /* PresentationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresentationModels.swift; sourceTree = "<group>"; };
 		92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSafetyGate.swift; sourceTree = "<group>"; };
 		979151427032FD08DB4317BB /* RealtimeWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeWebView.swift; sourceTree = "<group>"; };
@@ -39,6 +42,7 @@
 		DC7B0E2124320E2E704B08DB /* PresenterWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenterWindow.swift; sourceTree = "<group>"; };
 		E63FBD596FC2031E285BDD70 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
 		E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIRealtimeTokenService.swift; sourceTree = "<group>"; };
+		E94F61B283AE978974437000 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -66,6 +70,7 @@
 		52217B819FCFADFC3C75960D = {
 			isa = PBXGroup;
 			children = (
+				DAA5CA7A00FB045989805842 /* Resources */,
 				70DFFE97F25AA9DAB752FDF1 /* Sources */,
 				6AB46EBE1191186DDB7A5528 /* Products */,
 			);
@@ -120,6 +125,16 @@
 			path = App;
 			sourceTree = "<group>";
 		};
+		DAA5CA7A00FB045989805842 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				E94F61B283AE978974437000 /* Assets.xcassets */,
+				6CA35DD1BA8EDF0D7DCFD10B /* realtime-bridge.js */,
+			);
+			name = Resources;
+			path = AutoPresenter/Resources;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -128,6 +143,7 @@
 			buildConfigurationList = 50DF44832E5BE0C93A4A2CF3 /* Build configuration list for PBXNativeTarget "AutoPresenter" */;
 			buildPhases = (
 				43E0CF9420C3C15E7DCA8387 /* Sources */,
+				BA3398B9CE314CAE9E4FA7BB /* Resources */,
 			);
 			buildRules = (
 			);
@@ -172,6 +188,18 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		BA3398B9CE314CAE9E4FA7BB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1C100028812D982AD1AB83B /* Assets.xcassets in Resources */,
+				C1387DA3D9281F311A119A1D /* realtime-bridge.js in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		43E0CF9420C3C15E7DCA8387 /* Sources */ = {

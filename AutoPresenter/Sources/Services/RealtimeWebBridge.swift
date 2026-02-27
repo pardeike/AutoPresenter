@@ -236,7 +236,6 @@ final class RealtimeWebBridge: NSObject {
             .deletingLastPathComponent()
         let fallbackCandidates = [
             currentDirectory.appendingPathComponent("AutoPresenter/Resources/realtime-bridge.js"),
-            currentDirectory.appendingPathComponent("realtime-bridge.js"),
             sourceRelativeBase.appendingPathComponent("Resources/realtime-bridge.js")
         ]
 

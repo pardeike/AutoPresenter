@@ -112,7 +112,7 @@ final class AppViewModel: ObservableObject {
         return decoder
     }()
 
-    init(settings: AppSettings, bootstrapExampleDeck: Bool = true) {
+    init(settings: AppSettings) {
         self.settings = settings
         bridge = RealtimeWebBridge()
         bridge.onMessage = { [weak self] payload in
@@ -121,9 +121,6 @@ final class AppViewModel: ObservableObject {
         webViewHost.attach(bridge.webView)
         prepareLogFileIfNeeded()
         loadAPIKeyFromKnownLocations()
-        if bootstrapExampleDeck {
-            bootstrapDeckPath()
-        }
         if let logFileURL {
             appendLog("Mirroring command log to \(logFileURL.path)")
         }
@@ -1810,38 +1807,6 @@ final class AppViewModel: ObservableObject {
         guard let event = NSApp.currentEvent else { return false }
         guard event.type == .keyDown else { return false }
         return event.keyCode == 123 || event.keyCode == 124
-    }
-
-    private func bootstrapDeckPath() {
-        let normalizedMeetupDeck = URL(fileURLWithPath: "/Users/ap/Desktop/Meetup136.json")
-        if FileManager.default.fileExists(atPath: normalizedMeetupDeck.path) {
-            deckFilePath = normalizedMeetupDeck.path
-            loadDeckFromPath()
-            appendLog("Loaded normalized Meetup deck from Desktop")
-            return
-        }
-
-        let externalExample = URL(fileURLWithPath: "/Users/ap/Projects/MeTube/documentation/presentation.json")
-        if FileManager.default.fileExists(atPath: externalExample.path) {
-            deckFilePath = externalExample.path
-            loadDeckFromPath()
-            appendLog("Loaded example deck from MeTube documentation")
-            return
-        }
-
-        let workspaceSample = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("presentation.sample.json")
-
-        if FileManager.default.fileExists(atPath: workspaceSample.path) {
-            deckFilePath = workspaceSample.path
-            loadDeckFromPath()
-            return
-        }
-
-        if let bundledSample = Bundle.main.url(forResource: "presentation.sample", withExtension: "json") {
-            deckFilePath = bundledSample.path
-            loadDeckFromPath()
-        }
     }
 
     private func loadAPIKeyFromKnownLocations() {
