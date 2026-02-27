@@ -57,6 +57,20 @@ actor CommandSafetyGate {
             return GateDecision(accepted: false, reason: "model requested stay", command: normalized)
         }
 
+        if normalized.action == .mark {
+            guard let markIndex = normalized.markIndex else {
+                pendingCandidate = nil
+                return GateDecision(accepted: false, reason: "mark missing mark_index", command: normalized)
+            }
+            guard markIndex > 0 else {
+                pendingCandidate = nil
+                return GateDecision(accepted: false, reason: "mark_index must be positive", command: normalized)
+            }
+
+            pendingCandidate = nil
+            return GateDecision(accepted: true, reason: "accepted mark", command: normalized)
+        }
+
         if normalized.action == .goto {
             guard let targetSlide = normalized.targetSlide else {
                 pendingCandidate = nil
@@ -112,11 +126,13 @@ actor CommandSafetyGate {
             return SlideCommand(
                 action: command.action,
                 targetSlide: nil,
+                markIndex: nil,
                 confidence: command.confidence,
                 rationale: command.rationale,
-                utteranceExcerpt: command.utteranceExcerpt
+                utteranceExcerpt: command.utteranceExcerpt,
+                highlightPhrases: command.highlightPhrases
             )
-        case .goto:
+        case .goto, .mark:
             return command
         }
     }

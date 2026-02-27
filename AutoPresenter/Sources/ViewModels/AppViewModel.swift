@@ -24,6 +24,8 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var isStarting = false
     @Published private(set) var connectionState = "idle"
     @Published private(set) var statusLine = "Ready"
+    @Published private(set) var highlightedPhrasesBySlide: [Int: [String]] = [:]
+    @Published private(set) var markedSegmentIndicesBySlide: [Int: Set<Int>] = [:]
 
     let bridge: RealtimeWebBridge
 
@@ -84,6 +86,14 @@ final class AppViewModel: ObservableObject {
 
     var logLines: [String] {
         logEntries
+    }
+
+    var currentSlideHighlightPhrases: [String] {
+        highlightedPhrasesBySlide[currentSlideIndex] ?? []
+    }
+
+    var currentSlideMarkedSegmentIndices: Set<Int> {
+        markedSegmentIndicesBySlide[currentSlideIndex] ?? []
     }
 
     func chooseDeckFile() {
@@ -352,13 +362,25 @@ final class AppViewModel: ObservableObject {
 
     private func evaluateCommand(_ command: SlideCommand, source: String) async {
         let slideIndices = deck?.slideIndices ?? []
-        let (resolvedCommand, recoveryNote) = recoverGotoTargetIfMissing(
+        let currentMarkableSegments = deck?.slide(at: currentSlideIndex)?.markableSegments() ?? []
+
+        let (gotoResolvedCommand, gotoRecoveryNote) = recoverGotoTargetIfMissing(
             command: command,
             validSlideIndices: slideIndices
         )
-        if let recoveryNote {
-            appendLog("[RECOVERED][\(source)] \(recoveryNote)")
+        if let gotoRecoveryNote {
+            appendLog("[RECOVERED][\(source)] \(gotoRecoveryNote)")
         }
+
+        let (resolvedCommand, markRecoveryNote) = recoverMarkIndexIfMissing(
+            command: gotoResolvedCommand,
+            markableSegments: currentMarkableSegments
+        )
+        if let markRecoveryNote {
+            appendLog("[RECOVERED][\(source)] \(markRecoveryNote)")
+        }
+
+        applyHighlightPhrases(from: resolvedCommand, source: source)
 
         let policy = CommandPolicy(
             confidenceThreshold: confidenceThreshold,
@@ -435,6 +457,65 @@ final class AppViewModel: ObservableObject {
             statusLine = "Accepted goto: slide \(targetSlide)"
             appendLog("[APPLIED][\(source)] moved to slide \(targetSlide) via goto")
             pushContextUpdate(reason: "model goto")
+        case .mark:
+            guard let markIndex = command.markIndex else {
+                statusLine = "Accepted mark ignored: missing mark_index"
+                appendLog("[APPLIED][\(source)] mark ignored: accepted command missing mark_index")
+                return
+            }
+            let slideIndex = currentSlideIndex
+            guard let slide = deck.slide(at: slideIndex) else {
+                statusLine = "Accepted mark ignored: no current slide"
+                appendLog("[APPLIED][\(source)] mark ignored: no current slide loaded")
+                return
+            }
+            let segments = slide.markableSegments()
+            let validIndices = Set(segments.map(\.index))
+            guard validIndices.contains(markIndex) else {
+                statusLine = "Accepted mark ignored: invalid index"
+                appendLog("[APPLIED][\(source)] mark ignored: mark_index \(markIndex) outside current slide segments")
+                return
+            }
+
+            var markedIndices = markedSegmentIndicesBySlide[slideIndex] ?? []
+            let isNewMark = markedIndices.insert(markIndex).inserted
+            markedSegmentIndicesBySlide[slideIndex] = markedIndices
+            statusLine = "Marked segment \(markIndex) on slide \(slideIndex)"
+            if isNewMark {
+                appendLog("[APPLIED][\(source)] marked segment \(markIndex) on slide \(slideIndex)")
+            } else {
+                appendLog("[APPLIED][\(source)] segment \(markIndex) already marked on slide \(slideIndex)")
+            }
+
+            let nonTitleIndices = Set(segments.filter { $0.kind != "title" }.map(\.index))
+            let requiredIndicesForAdvance = nonTitleIndices.isEmpty ? validIndices : nonTitleIndices
+            let allRequiredMarked = !requiredIndicesForAdvance.isEmpty && markedIndices.isSuperset(of: requiredIndicesForAdvance)
+            let lastSegmentIndex = segments.map(\.index).max()
+            let markedLastSegment = (lastSegmentIndex == markIndex)
+            if allRequiredMarked || markedLastSegment {
+                let nextIndex = deck.clampedSlideIndex(slideIndex + 1)
+                if nextIndex != slideIndex {
+                    currentSlideIndex = nextIndex
+                    statusLine = "All segments marked on slide \(slideIndex): auto-advanced to \(nextIndex)"
+                    if markedLastSegment && !allRequiredMarked {
+                        appendLog("[AUTO][\(source)] last segment \(markIndex) marked on slide \(slideIndex); advanced to slide \(nextIndex)")
+                    } else if nonTitleIndices.isEmpty {
+                        appendLog("[AUTO][\(source)] all \(validIndices.count) segments marked on slide \(slideIndex); advanced to slide \(nextIndex)")
+                    } else {
+                        appendLog("[AUTO][\(source)] all non-title segments marked on slide \(slideIndex); advanced to slide \(nextIndex)")
+                    }
+                    pushContextUpdate(reason: "auto advance after full coverage")
+                } else {
+                    statusLine = "All segments marked on final slide \(slideIndex)"
+                    if markedLastSegment && !allRequiredMarked {
+                        appendLog("[AUTO][\(source)] last segment \(markIndex) marked on final slide \(slideIndex)")
+                    } else if nonTitleIndices.isEmpty {
+                        appendLog("[AUTO][\(source)] all \(validIndices.count) segments marked on final slide \(slideIndex)")
+                    } else {
+                        appendLog("[AUTO][\(source)] all non-title segments marked on final slide \(slideIndex)")
+                    }
+                }
+            }
         case .stay:
             statusLine = "Accepted stay: no slide change"
             appendLog("[APPLIED][\(source)] stay applied: no slide change (slide \(currentSlideIndex))")
@@ -449,10 +530,86 @@ final class AppViewModel: ObservableObject {
         if let targetSlide = command.targetSlide {
             parts.append("target=\(targetSlide)")
         }
+        if let markIndex = command.markIndex {
+            parts.append("mark=\(markIndex)")
+        }
+        if let highlightPhrases = command.highlightPhrases, !highlightPhrases.isEmpty {
+            parts.append("highlights=\(highlightPhrases.count)")
+        }
         if !command.rationale.isEmpty {
             parts.append("rationale=\(command.rationale)")
         }
         return parts.joined(separator: " ")
+    }
+
+    private func applyHighlightPhrases(from command: SlideCommand, source: String) {
+        let phraseCandidates = command.highlightPhrases ?? []
+        let candidates: [String]
+        if phraseCandidates.isEmpty {
+            candidates = command.utteranceExcerpt.map { [$0] } ?? []
+        } else {
+            candidates = phraseCandidates
+        }
+        let sanitized = sanitizeHighlightPhrases(candidates)
+
+        guard !sanitized.isEmpty else {
+            return
+        }
+
+        let slideIndex = currentSlideIndex
+        var existing = highlightedPhrasesBySlide[slideIndex] ?? []
+        var existingKeys = Set(existing.map { $0.lowercased() })
+        var addedCount = 0
+
+        for phrase in sanitized {
+            let key = phrase.lowercased()
+            guard !existingKeys.contains(key) else {
+                continue
+            }
+            existing.append(phrase)
+            existingKeys.insert(key)
+            addedCount += 1
+        }
+
+        guard addedCount > 0 else {
+            return
+        }
+
+        let maxHighlightsPerSlide = 20
+        if existing.count > maxHighlightsPerSlide {
+            existing = Array(existing.suffix(maxHighlightsPerSlide))
+        }
+        highlightedPhrasesBySlide[slideIndex] = existing
+        appendLog("[HIGHLIGHT][\(source)] slide \(slideIndex) +\(addedCount)")
+    }
+
+    private func sanitizeHighlightPhrases(_ phrases: [String]) -> [String] {
+        var seen: Set<String> = []
+        var output: [String] = []
+
+        for phrase in phrases {
+            let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 2 else {
+                continue
+            }
+            guard trimmed.count <= 120 else {
+                continue
+            }
+
+            let key = trimmed.lowercased()
+            guard !seen.contains(key) else {
+                continue
+            }
+
+            seen.insert(key)
+            output.append(trimmed)
+        }
+
+        let maxHighlightsPerTurn = 5
+        if output.count > maxHighlightsPerTurn {
+            return Array(output.prefix(maxHighlightsPerTurn))
+        }
+        return output
     }
 
     private func recoverGotoTargetIfMissing(
@@ -505,13 +662,101 @@ final class AppViewModel: ObservableObject {
         let recoveredCommand = SlideCommand(
             action: .goto,
             targetSlide: inferredTarget,
+            markIndex: nil,
             confidence: command.confidence,
             rationale: command.rationale,
-            utteranceExcerpt: command.utteranceExcerpt
+            utteranceExcerpt: command.utteranceExcerpt,
+            highlightPhrases: command.highlightPhrases
         )
 
         let note = "Inferred goto target=\(inferredTarget) from \(sourceLabel)"
         return (recoveredCommand, note)
+    }
+
+    private func recoverMarkIndexIfMissing(
+        command: SlideCommand,
+        markableSegments: [SlideMarkSegment]
+    ) -> (command: SlideCommand, recoveryNote: String?) {
+        guard command.action == .mark else {
+            return (command, nil)
+        }
+
+        guard command.markIndex == nil else {
+            return (command, nil)
+        }
+
+        let validMarkIndices = Set(markableSegments.map(\.index))
+        guard !validMarkIndices.isEmpty else {
+            return (command, nil)
+        }
+
+        let analysisText = [command.utteranceExcerpt, command.rationale]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .lowercased()
+
+        if !analysisText.isEmpty,
+           let inferredMarkIndex = extractReferencedMarkNumber(from: analysisText),
+           validMarkIndices.contains(inferredMarkIndex) {
+            let recoveredCommand = SlideCommand(
+                action: .mark,
+                targetSlide: nil,
+                markIndex: inferredMarkIndex,
+                confidence: command.confidence,
+                rationale: command.rationale,
+                utteranceExcerpt: command.utteranceExcerpt,
+                highlightPhrases: command.highlightPhrases
+            )
+            return (recoveredCommand, "Inferred mark_index=\(inferredMarkIndex) from numeric reference")
+        }
+
+        if let contentInferredIndex = inferMarkIndexFromContent(
+            command: command,
+            markableSegments: markableSegments
+        ) {
+            let recoveredCommand = SlideCommand(
+                action: .mark,
+                targetSlide: nil,
+                markIndex: contentInferredIndex,
+                confidence: command.confidence,
+                rationale: command.rationale,
+                utteranceExcerpt: command.utteranceExcerpt,
+                highlightPhrases: command.highlightPhrases
+            )
+            return (recoveredCommand, "Inferred mark_index=\(contentInferredIndex) from slide text match")
+        }
+
+        if !analysisText.isEmpty,
+           let hintedMarkIndex = inferMarkIndexFromRationaleHints(
+               analysisText,
+               markableSegments: markableSegments
+           ) {
+            let recoveredCommand = SlideCommand(
+                action: .mark,
+                targetSlide: nil,
+                markIndex: hintedMarkIndex,
+                confidence: command.confidence,
+                rationale: command.rationale,
+                utteranceExcerpt: command.utteranceExcerpt,
+                highlightPhrases: command.highlightPhrases
+            )
+            return (recoveredCommand, "Inferred mark_index=\(hintedMarkIndex) from rationale hint")
+        }
+
+        if let fallbackIndex = fallbackMarkIndex(from: markableSegments) {
+            let recoveredCommand = SlideCommand(
+                action: .mark,
+                targetSlide: nil,
+                markIndex: fallbackIndex,
+                confidence: command.confidence,
+                rationale: command.rationale,
+                utteranceExcerpt: command.utteranceExcerpt,
+                highlightPhrases: command.highlightPhrases
+            )
+            return (recoveredCommand, "Inferred mark_index=\(fallbackIndex) from deterministic fallback")
+        }
+        return (command, nil)
     }
 
     private func mentionsFirstSlide(in text: String) -> Bool {
@@ -561,6 +806,267 @@ final class AppViewModel: ObservableObject {
         return nil
     }
 
+    private func extractReferencedMarkNumber(from text: String) -> Int? {
+        let patterns = [
+            #"(?i)\bmark\s*(?:segment\s*)?(\d{1,3})\b"#,
+            #"(?i)\bsegment\s*(\d{1,3})\b"#,
+            #"(?i)\bhighlight\s*(?:segment\s*)?(\d{1,3})\b"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                continue
+            }
+
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard let match = regex.firstMatch(in: text, options: [], range: range) else {
+                continue
+            }
+
+            guard
+                match.numberOfRanges > 1,
+                let numberRange = Range(match.range(at: 1), in: text),
+                let number = Int(text[numberRange])
+            else {
+                continue
+            }
+
+            return number
+        }
+
+        return nil
+    }
+
+    private func inferMarkIndexFromContent(
+        command: SlideCommand,
+        markableSegments: [SlideMarkSegment]
+    ) -> Int? {
+        guard !markableSegments.isEmpty else {
+            return nil
+        }
+
+        var candidatePhrases = sanitizeHighlightPhrases(command.highlightPhrases ?? [])
+        if let excerpt = command.utteranceExcerpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !excerpt.isEmpty {
+            candidatePhrases.append(excerpt)
+        }
+        let rationale = command.rationale.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rationale.isEmpty {
+            candidatePhrases.append(rationale)
+        }
+
+        var dedupedCandidates: [String] = []
+        var seenCandidates: Set<String> = []
+        for phrase in candidatePhrases {
+            let key = phrase.lowercased()
+            guard !seenCandidates.contains(key) else {
+                continue
+            }
+            seenCandidates.insert(key)
+            dedupedCandidates.append(phrase)
+        }
+
+        guard !dedupedCandidates.isEmpty else {
+            return nil
+        }
+
+        var bestContainment: (index: Int, score: Int)?
+        for candidate in dedupedCandidates {
+            let normalizedCandidate = normalizeForMarkMatching(candidate)
+            guard normalizedCandidate.count >= 2 else {
+                continue
+            }
+
+            for segment in markableSegments {
+                let normalizedSegment = normalizeForMarkMatching(segment.text)
+                guard !normalizedSegment.isEmpty else {
+                    continue
+                }
+
+                if normalizedSegment.contains(normalizedCandidate) || normalizedCandidate.contains(normalizedSegment) {
+                    let score = min(normalizedCandidate.count, normalizedSegment.count)
+                    if let current = bestContainment {
+                        if score > current.score {
+                            bestContainment = (segment.index, score)
+                        }
+                    } else {
+                        bestContainment = (segment.index, score)
+                    }
+                }
+            }
+        }
+
+        if let bestContainment {
+            return bestContainment.index
+        }
+
+        var bestOverlap: (index: Int, overlapCount: Int, tokenCount: Int)?
+        for candidate in dedupedCandidates {
+            let candidateTokens = tokenSet(for: candidate)
+            guard candidateTokens.count >= 2 else {
+                continue
+            }
+
+            for segment in markableSegments {
+                let segmentTokens = tokenSet(for: segment.text)
+                guard !segmentTokens.isEmpty else {
+                    continue
+                }
+
+                let overlapCount = candidateTokens.intersection(segmentTokens).count
+                guard overlapCount >= 2 else {
+                    continue
+                }
+
+                let tokenCount = min(candidateTokens.count, segmentTokens.count)
+                if let current = bestOverlap {
+                    if overlapCount > current.overlapCount
+                        || (overlapCount == current.overlapCount && tokenCount > current.tokenCount) {
+                        bestOverlap = (segment.index, overlapCount, tokenCount)
+                    }
+                } else {
+                    bestOverlap = (segment.index, overlapCount, tokenCount)
+                }
+            }
+        }
+
+        return bestOverlap?.index
+    }
+
+    private func inferMarkIndexFromRationaleHints(
+        _ analysisText: String,
+        markableSegments: [SlideMarkSegment]
+    ) -> Int? {
+        guard !analysisText.isEmpty else {
+            return nil
+        }
+        guard !markableSegments.isEmpty else {
+            return nil
+        }
+
+        if analysisText.contains("subtitle"),
+           let index = firstMarkIndex(ofKindContaining: "subtitle", in: markableSegments) {
+            return index
+        }
+        if analysisText.contains("title"),
+           let index = firstMarkIndex(ofKindContaining: "title", in: markableSegments) {
+            return index
+        }
+        if analysisText.contains("quote"),
+           let index = firstMarkIndex(ofKindContaining: "quote", in: markableSegments) {
+            return index
+        }
+        if analysisText.contains("attribution"),
+           let index = firstMarkIndex(ofKindContaining: "attribution", in: markableSegments) {
+            return index
+        }
+        if analysisText.contains("caption"),
+           let index = firstMarkIndex(ofKindContaining: "caption", in: markableSegments) {
+            return index
+        }
+        if analysisText.contains("image"),
+           let index = firstMarkIndex(ofKindContaining: "image", in: markableSegments) {
+            return index
+        }
+        if analysisText.contains("bullet"),
+           let index = inferBulletMarkIndex(from: analysisText, markableSegments: markableSegments) {
+            return index
+        }
+
+        return nil
+    }
+
+    private func inferBulletMarkIndex(
+        from text: String,
+        markableSegments: [SlideMarkSegment]
+    ) -> Int? {
+        let bulletSegments = markableSegments.filter { $0.kind.contains("bullet") }
+        guard !bulletSegments.isEmpty else {
+            return nil
+        }
+
+        let requestedOrdinal = extractBulletOrdinal(from: text)
+        guard let requestedOrdinal,
+              requestedOrdinal > 0,
+              requestedOrdinal <= bulletSegments.count else {
+            return nil
+        }
+
+        return bulletSegments[requestedOrdinal - 1].index
+    }
+
+    private func extractBulletOrdinal(from text: String) -> Int? {
+        if let regex = try? NSRegularExpression(pattern: #"(?i)\b(\d{1,3})(?:st|nd|rd|th)?\s+bullet\b"#) {
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            if let match = regex.firstMatch(in: text, options: [], range: range),
+               match.numberOfRanges > 1,
+               let numberRange = Range(match.range(at: 1), in: text),
+               let value = Int(text[numberRange]) {
+                return value
+            }
+        }
+
+        let ordinalWords: [(String, Int)] = [
+            ("first", 1),
+            ("second", 2),
+            ("third", 3),
+            ("fourth", 4),
+            ("fifth", 5),
+            ("sixth", 6),
+            ("seventh", 7),
+            ("eighth", 8),
+            ("ninth", 9),
+            ("tenth", 10),
+            ("eleventh", 11),
+            ("twelfth", 12)
+        ]
+
+        for (word, value) in ordinalWords {
+            if text.contains("\(word) bullet") || text.contains("bullet \(word)") {
+                return value
+            }
+        }
+
+        return nil
+    }
+
+    private func firstMarkIndex(
+        ofKindContaining kindSubstring: String,
+        in markableSegments: [SlideMarkSegment]
+    ) -> Int? {
+        markableSegments.first { $0.kind.contains(kindSubstring) }?.index
+    }
+
+    private func fallbackMarkIndex(from markableSegments: [SlideMarkSegment]) -> Int? {
+        guard !markableSegments.isEmpty else {
+            return nil
+        }
+
+        let existingMarks = markedSegmentIndicesBySlide[currentSlideIndex] ?? []
+        if let firstUnmarked = markableSegments.first(where: { !existingMarks.contains($0.index) }) {
+            return firstUnmarked.index
+        }
+
+        return markableSegments.first?.index
+    }
+
+    private func normalizeForMarkMatching(_ text: String) -> String {
+        let lowercased = text.lowercased()
+        let separators = CharacterSet.alphanumerics.inverted
+        return lowercased
+            .components(separatedBy: separators)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func tokenSet(for text: String) -> Set<String> {
+        let separators = CharacterSet.alphanumerics.inverted
+        let tokens = text.lowercased()
+            .components(separatedBy: separators)
+            .filter { $0.count >= 3 }
+        return Set(tokens)
+    }
+
     private func formatLogNumber(_ value: Double) -> String {
         value.formatted(
             .number
@@ -585,6 +1091,14 @@ final class AppViewModel: ObservableObject {
     }
 
     private func bootstrapDeckPath() {
+        let normalizedMeetupDeck = URL(fileURLWithPath: "/Users/ap/Desktop/Meetup136.json")
+        if FileManager.default.fileExists(atPath: normalizedMeetupDeck.path) {
+            deckFilePath = normalizedMeetupDeck.path
+            loadDeckFromPath()
+            appendLog("Loaded normalized Meetup deck from Desktop")
+            return
+        }
+
         let externalExample = URL(fileURLWithPath: "/Users/ap/Projects/MeTube/documentation/presentation.json")
         if FileManager.default.fileExists(atPath: externalExample.path) {
             deckFilePath = externalExample.path
@@ -749,6 +1263,8 @@ final class AppViewModel: ObservableObject {
 
     private func applyLoadedDeck(_ loadedDeck: PresentationDeck, sourceURL: URL?, sourceDescription: String) {
         deck = loadedDeck
+        highlightedPhrasesBySlide.removeAll(keepingCapacity: true)
+        markedSegmentIndicesBySlide.removeAll(keepingCapacity: true)
         loadedDeckURL = sourceURL
         if let sourceURL {
             deckFilePath = sourceURL.path

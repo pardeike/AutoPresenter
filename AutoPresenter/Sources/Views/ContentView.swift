@@ -37,7 +37,11 @@ struct ContentView: View {
     private var slidePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let slide = viewModel.deck?.slide(at: viewModel.currentSlideIndex) {
-                LargeSlidePreview(slide: slide)
+                LargeSlidePreview(
+                    slide: slide,
+                    highlightPhrases: viewModel.currentSlideHighlightPhrases,
+                    markedSegmentIndices: viewModel.currentSlideMarkedSegmentIndices
+                )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 VStack(alignment: .center, spacing: 8) {
@@ -264,13 +268,41 @@ private struct LabeledSlider: View {
 
 private struct LargeSlidePreview: View {
     let slide: PresentationSlide
+    let highlightPhrases: [String]
+    let markedSegmentIndices: Set<Int>
+
+    private var segmentBuckets: SlideSegmentBuckets {
+        slide.segmentBuckets()
+    }
+
+    private var normalizedHighlightPhrases: [String] {
+        var seen: Set<String> = []
+        let cleaned = highlightPhrases.compactMap { phrase -> String? in
+            let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 2 else { return nil }
+            guard trimmed.count <= 120 else { return nil }
+            let key = trimmed.lowercased()
+            guard !seen.contains(key) else { return nil }
+            seen.insert(key)
+            return trimmed
+        }
+        return cleaned.sorted { $0.count > $1.count }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top) {
-                Text(slide.title)
-                    .font(.title.weight(.semibold))
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 8) {
+                    if segmentBuckets.title.isEmpty {
+                        Text("Untitled")
+                            .font(.title.weight(.semibold))
+                    } else {
+                        ForEach(segmentBuckets.title, id: \.index) { segment in
+                            segmentTextRow(segment, font: .title.weight(.semibold))
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 Text(slide.layout.rawValue.uppercased())
                     .font(.subheadline.weight(.semibold))
@@ -281,10 +313,12 @@ private struct LargeSlidePreview: View {
                     .clipShape(Capsule())
             }
 
-            if !slide.subtitle.isEmpty {
-                Text(slide.subtitle)
-                    .font(.title3.weight(.medium))
-                    .foregroundStyle(.secondary)
+            if !segmentBuckets.subtitle.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(segmentBuckets.subtitle, id: \.index) { segment in
+                        segmentTextRow(segment, font: .title3.weight(.medium), secondary: true)
+                    }
+                }
             }
 
             Divider()
@@ -311,76 +345,187 @@ private struct LargeSlidePreview: View {
     private var contentBody: some View {
         switch slide.layout {
         case .quote:
-            if let quote = slide.quote, !quote.isEmpty {
-                Text("\"\(quote)\"")
-                    .font(.title2.italic())
+            if !segmentBuckets.quote.isEmpty {
+                ForEach(segmentBuckets.quote, id: \.index) { segment in
+                    segmentTextRow(segment, font: .title2.italic())
+                }
             }
-            if let attribution = slide.attribution, !attribution.isEmpty {
-                Text(attribution)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+            if !segmentBuckets.attribution.isEmpty {
+                ForEach(segmentBuckets.attribution, id: \.index) { segment in
+                    segmentTextRow(segment, font: .body, secondary: true)
+                }
             }
         case .image:
-            if let imagePlaceholder = slide.imagePlaceholder, !imagePlaceholder.isEmpty {
+            if !segmentBuckets.imagePlaceholder.isEmpty {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(.black.opacity(0.06))
                     .overlay(
-                        Text(imagePlaceholder)
-                            .font(.body)
-                            .padding(10)
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(segmentBuckets.imagePlaceholder, id: \.index) { segment in
+                                segmentTextRow(segment, font: .body)
+                            }
+                        }
+                        .padding(10)
                     )
                     .frame(minHeight: 180)
             }
-            if let caption = slide.caption, !caption.isEmpty {
-                Text(caption)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+            if !segmentBuckets.caption.isEmpty {
+                ForEach(segmentBuckets.caption, id: \.index) { segment in
+                    segmentTextRow(segment, font: .body, secondary: true)
+                }
             }
         case .twoColumn:
             HStack(alignment: .top, spacing: 20) {
-                slideColumn(title: slide.leftColumn?.title ?? "Left", bullets: slide.leftColumn?.bullets ?? [])
-                slideColumn(title: slide.rightColumn?.title ?? "Right", bullets: slide.rightColumn?.bullets ?? [])
+                slideColumn(
+                    titleSegments: segmentBuckets.leftTitle,
+                    bulletSegments: segmentBuckets.leftBullets,
+                    fallbackTitle: "Left"
+                )
+                slideColumn(
+                    titleSegments: segmentBuckets.rightTitle,
+                    bulletSegments: segmentBuckets.rightBullets,
+                    fallbackTitle: "Right"
+                )
                     .padding(.trailing, 10)
             }
         case .title, .bullets, .unknown:
-            if slide.bullets.isEmpty {
+            if segmentBuckets.bodyBullets.isEmpty {
                 Text("No bullet content")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(Array(slide.bullets.enumerated()), id: \.offset) { _, bullet in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("•")
-                            .font(.title3.weight(.semibold))
-                        Text(bullet)
-                            .font(.title3)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                ForEach(segmentBuckets.bodyBullets, id: \.index) { segment in
+                    bulletSegmentRow(segment)
                 }
             }
         }
     }
 
     @ViewBuilder
-private func slideColumn(title: String, bullets: [String]) -> some View {
+    private func slideColumn(
+        titleSegments: [SlideMarkSegment],
+        bulletSegments: [SlideMarkSegment],
+        fallbackTitle: String
+    ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.title3.weight(.semibold))
-            if bullets.isEmpty {
+            if titleSegments.isEmpty {
+                Text(fallbackTitle)
+                    .font(.title3.weight(.semibold))
+            } else {
+                ForEach(titleSegments, id: \.index) { segment in
+                    segmentTextRow(segment, font: .title3.weight(.semibold))
+                }
+            }
+
+            if bulletSegments.isEmpty {
                 Text("No bullet content")
                     .font(.body)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(Array(bullets.enumerated()), id: \.offset) { _, bullet in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("•")
-                            .font(.title3.weight(.semibold))
-                        Text(bullet)
-                            .font(.title3)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                ForEach(bulletSegments, id: \.index) { segment in
+                    bulletSegmentRow(segment)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func bulletSegmentRow(_ segment: SlideMarkSegment) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            segmentIndexBadge(segment)
+            Text("•")
+                .font(.title3.weight(.semibold))
+            segmentText(segment)
+                .font(.title3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func segmentTextRow(_ segment: SlideMarkSegment, font: Font, secondary: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            segmentIndexBadge(segment)
+            segmentText(segment)
+                .font(font)
+                .foregroundStyle(secondary ? .secondary : .primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func segmentIndexBadge(_ segment: SlideMarkSegment) -> some View {
+        HStack(spacing: 4) {
+            Text("\(segment.index)")
+                .font(.caption2.weight(.bold))
+            Text(segment.kind)
+                .font(.caption2.weight(.medium))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(.black.opacity(0.08))
+        .clipShape(Capsule())
+    }
+
+    private func segmentText(_ segment: SlideMarkSegment) -> Text {
+        Text(
+            makeHighlightedAttributedString(
+                from: segment.text,
+                isMarkedByIndex: markedSegmentIndices.contains(segment.index)
+            )
+        )
+    }
+
+    private func makeHighlightedAttributedString(from rawText: String, isMarkedByIndex: Bool) -> AttributedString {
+        var attributed = AttributedString(rawText)
+
+        if isMarkedByIndex {
+            let fullRange = attributed.startIndex..<attributed.endIndex
+            attributed[fullRange].backgroundColor = .yellow.opacity(0.75)
+            attributed[fullRange].foregroundColor = .primary
+        }
+
+        for phrase in normalizedHighlightPhrases {
+            let ranges = highlightRanges(of: phrase, in: rawText)
+            for nsRange in ranges {
+                guard
+                    let stringRange = Range(nsRange, in: rawText),
+                    let lower = AttributedString.Index(stringRange.lowerBound, within: attributed),
+                    let upper = AttributedString.Index(stringRange.upperBound, within: attributed)
+                else {
+                    continue
+                }
+
+                let highlightedRange = lower..<upper
+                attributed[highlightedRange].backgroundColor = .yellow.opacity(0.6)
+                attributed[highlightedRange].foregroundColor = .primary
+            }
+        }
+
+        return attributed
+    }
+
+    private func highlightRanges(of phrase: String, in text: String) -> [NSRange] {
+        let nsText = text as NSString
+        var ranges: [NSRange] = []
+        var searchRange = NSRange(location: 0, length: nsText.length)
+
+        while searchRange.length > 0 {
+            let foundRange = nsText.range(
+                of: phrase,
+                options: [.caseInsensitive, .diacriticInsensitive],
+                range: searchRange
+            )
+
+            guard foundRange.location != NSNotFound else {
+                break
+            }
+
+            ranges.append(foundRange)
+            let nextLocation = foundRange.location + max(foundRange.length, 1)
+            guard nextLocation < nsText.length else {
+                break
+            }
+            searchRange = NSRange(location: nextLocation, length: nsText.length - nextLocation)
+        }
+
+        return ranges
     }
 }

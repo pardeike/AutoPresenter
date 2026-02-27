@@ -17,12 +17,16 @@
       properties: {
         action: {
           type: "string",
-          enum: ["next", "previous", "goto", "stay"],
+          enum: ["next", "previous", "goto", "mark", "stay"],
           description: "Slide control action",
         },
         target_slide: {
           type: ["integer", "null"],
           description: "Required when action is goto, otherwise null",
+        },
+        mark_index: {
+          type: ["integer", "null"],
+          description: "Required and non-null when action is mark, otherwise null",
         },
         confidence: {
           type: "number",
@@ -32,14 +36,20 @@
         },
         rationale: {
           type: "string",
-          description: "Short explanation for the selected action (max 18 words)",
+          description: "Short factual explanation for the selected action (4-10 words)",
         },
         utterance_excerpt: {
           type: ["string", "null"],
-          description: "Optional short excerpt of the triggering utterance (max 20 words)",
+          description: "Optional exact excerpt of the triggering utterance (max 10 words)",
+        },
+        highlight_phrases: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 5,
+          description: "Optional phrases from current slide to highlight based on what was just said; [] when none",
         },
       },
-      required: ["action", "target_slide", "confidence", "rationale", "utterance_excerpt"],
+      required: ["action", "target_slide", "mark_index", "confidence", "rationale", "utterance_excerpt", "highlight_phrases"],
     },
   };
 
