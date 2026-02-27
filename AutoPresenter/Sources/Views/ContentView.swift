@@ -1,9 +1,10 @@
+import Combine
 import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var viewModel: AppViewModel
 
-    @State private var showBridgeView = false
+    @StateObject private var presenterBridge: AppPresenterWindowBridge
     @State private var presenterWindowManager = PresenterWindowManager()
 
     private let commandLogBottomID = "command-log-bottom"
@@ -12,8 +13,9 @@ struct ContentView: View {
     private let minimumSlidePanelWidth: CGFloat = 520
     private let minimumSidePanelWidth: CGFloat = 320
 
-    private var bridgeIsVisible: Bool {
-        showBridgeView
+    init(viewModel: AppViewModel) {
+        _viewModel = ObservedObject(wrappedValue: viewModel)
+        _presenterBridge = StateObject(wrappedValue: AppPresenterWindowBridge(viewModel: viewModel))
     }
 
     var body: some View {
@@ -35,6 +37,9 @@ struct ContentView: View {
         }
         .onDisappear {
             presenterWindowManager.close()
+            Task {
+                await viewModel.stopSession()
+            }
         }
     }
 
@@ -80,11 +85,6 @@ struct ContentView: View {
 
                 Spacer()
 
-                Button("Present") {
-                    presenterWindowManager.show(viewModel: viewModel)
-                }
-                .disabled(viewModel.deck == nil)
-
                 Button("Next") {
                     viewModel.nextSlide()
                 }
@@ -104,114 +104,140 @@ struct ContentView: View {
 
     private var sidePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Button(viewModel.isStarting ? "Starting..." : "Start Realtime") {
-                    Task {
-                        await viewModel.startSession()
-                    }
-                }
-                .disabled(viewModel.isStarting)
-
-                Button("Stop") {
-                    Task {
-                        await viewModel.stopSession()
-                    }
-                }
-                .disabled(!viewModel.isSessionActive)
-
-                Spacer(minLength: 8)
-
-                Text(viewModel.statusLine)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            GroupBox("Safety Gate") {
-                VStack(alignment: .leading, spacing: 10) {
-                    LabeledSlider(
-                        label: "Confidence Threshold",
-                        value: $viewModel.confidenceThreshold,
-                        range: 0.0...1.0,
-                        step: 0.01
-                    )
-                    LabeledSlider(
-                        label: "Cooldown (seconds)",
-                        value: $viewModel.cooldownSeconds,
-                        range: 0.0...5.0,
-                        step: 0.05
-                    )
-                    LabeledSlider(
-                        label: "Dwell (seconds)",
-                        value: $viewModel.dwellSeconds,
-                        range: 0.0...3.0,
-                        step: 0.05
-                    )
-                }
-                .padding(.top, 4)
-            }
+            sessionControlRow
 
             HStack {
-                Text("Command Log")
+                Text(viewModel.usesDebugTextLogInMainWindow ? "Command Log" : "Activity")
                     .font(.headline)
                 Spacer()
-                Text("Connection: \(viewModel.connectionState)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if viewModel.usesDebugTextLogInMainWindow {
+                    Text("Connection: \(viewModel.connectionState)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Button("Clear") {
-                    viewModel.clearLog()
-                }
-                Button(showBridgeView ? "Hide Bridge" : "Show Bridge") {
-                    showBridgeView.toggle()
+                    viewModel.clearVisibleFeed()
                 }
             }
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(viewModel.logLines.enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.system(size: 12, weight: .regular, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .topLeading)
-                        }
-                        Color.clear
-                            .frame(height: 1)
-                            .id(commandLogBottomID)
-                    }
-                    .padding(10)
-                }
-                .onAppear {
-                    scrollCommandLogToBottom(proxy, animated: false)
-                }
-                .onChange(of: viewModel.logLines.count) { _, _ in
-                    scrollCommandLogToBottom(proxy)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(.black.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            if bridgeIsVisible {
-                Text("Embedded WebRTC Transport")
-                    .font(.headline)
-            }
-
-            RealtimeWebView(webView: viewModel.webView)
-                .frame(height: bridgeIsVisible ? 220 : 1)
-                .opacity(bridgeIsVisible ? 1.0 : 0.01)
-                .allowsHitTesting(bridgeIsVisible)
-                .accessibilityHidden(!bridgeIsVisible)
-                .clipShape(RoundedRectangle(cornerRadius: bridgeIsVisible ? 8 : 0))
-                .overlay {
-                    if bridgeIsVisible {
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(.black.opacity(0.12), lineWidth: 1)
-                    }
-                }
+            diagnosticsPanel
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    private var sessionControlRow: some View {
+        HStack(spacing: 12) {
+            Button {
+                viewModel.toggleRealtimeSession()
+            } label: {
+                RecordingToggleGlyph(
+                    isActive: viewModel.isRecordingControlActive,
+                    isBusy: viewModel.isSessionTransitioning
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!viewModel.canToggleSession)
+            .help(viewModel.isRecordingControlActive ? "Stop session" : "Start session")
+
+            Button {
+                presenterWindowManager.show(bridge: presenterBridge)
+            } label: {
+                PresentModeGlyph(isEnabled: viewModel.deck != nil)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.deck == nil)
+            .help("Open Present mode")
+
+            Spacer(minLength: 8)
+        }
+    }
+
+    @ViewBuilder
+    private var diagnosticsPanel: some View {
+        if viewModel.usesDebugTextLogInMainWindow {
+            debugLogPanel
+        } else {
+            activityFeedPanel
+        }
+    }
+
+    private var debugLogPanel: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(viewModel.logLines.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(size: 12, weight: .regular, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(commandLogBottomID)
+                }
+                .padding(10)
+            }
+            .onAppear {
+                scrollCommandLogToBottom(proxy, animated: false)
+            }
+            .onChange(of: viewModel.logLines.count) { _, _ in
+                scrollCommandLogToBottom(proxy)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.black.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var activityFeedPanel: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(viewModel.activityFeed) { entry in
+                        activityFeedRow(entry)
+                    }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(commandLogBottomID)
+                }
+                .padding(10)
+            }
+            .onAppear {
+                scrollCommandLogToBottom(proxy, animated: false)
+            }
+            .onChange(of: viewModel.activityFeed.count) { _, _ in
+                scrollCommandLogToBottom(proxy)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.black.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func activityFeedRow(_ entry: ActivityFeedEntry) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle()
+                .fill(activityColor(entry.level))
+                .frame(width: 8, height: 8)
+                .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entry.title)
+                    .font(.subheadline.weight(.semibold))
+                if let detail = entry.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(entry.timestamp.formatted(date: .omitted, time: .standard))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 
     private var slidePositionLabel: String {
@@ -254,23 +280,67 @@ struct ContentView: View {
             }
         }
     }
+
+    private func activityColor(_ level: ActivityFeedLevel) -> Color {
+        switch level {
+        case .info:
+            return Color(red: 0.31, green: 0.52, blue: 0.86)
+        case .success:
+            return Color(red: 0.22, green: 0.64, blue: 0.31)
+        case .warning:
+            return Color(red: 0.89, green: 0.58, blue: 0.17)
+        case .error:
+            return Color(red: 0.86, green: 0.26, blue: 0.24)
+        }
+    }
 }
 
-private struct LabeledSlider: View {
-    let label: String
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-    let step: Double
+private struct RecordingToggleGlyph: View {
+    let isActive: Bool
+    let isBusy: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(label)
-                Spacer()
-                Text(value.formatted(.number.precision(.fractionLength(2))))
-                    .font(.system(.body, design: .monospaced))
+        ZStack {
+            Circle()
+                .strokeBorder(.white.opacity(0.78), lineWidth: 3)
+                .background(
+                    Circle()
+                        .fill(.black.opacity(0.10))
+                )
+                .frame(width: 34, height: 34)
+
+            if isBusy {
+                ProgressView()
+                    .controlSize(.small)
+            } else if isActive {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color(red: 0.98, green: 0.24, blue: 0.24))
+                    .frame(width: 11, height: 11)
+            } else {
+                Circle()
+                    .fill(Color(red: 0.95, green: 0.28, blue: 0.28))
+                    .frame(width: 16, height: 16)
             }
-            Slider(value: $value, in: range, step: step)
+        }
+    }
+}
+
+private struct PresentModeGlyph: View {
+    let isEnabled: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(.white.opacity(0.65), lineWidth: 2)
+                .background(
+                    Circle()
+                        .fill(.black.opacity(0.08))
+                )
+                .frame(width: 34, height: 34)
+
+            Image(systemName: "play.rectangle.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(isEnabled ? .white : .secondary)
         }
     }
 }
@@ -536,5 +606,52 @@ private struct LargeSlidePreview: View {
         }
 
         return ranges
+    }
+}
+
+@MainActor
+private final class AppPresenterWindowBridge: ObservableObject, PresenterWindowBridge {
+    private let viewModel: AppViewModel
+
+    init(viewModel: AppViewModel) {
+        self.viewModel = viewModel
+    }
+
+    var initialState: PresenterWindowState {
+        makeState()
+    }
+
+    var stateUpdates: AnyPublisher<PresenterWindowState, Never> {
+        viewModel.objectWillChange
+            .receive(on: RunLoop.main)
+            .map { [weak self] _ in
+                self?.makeState() ?? .empty
+            }
+            .prepend(makeState())
+            .eraseToAnyPublisher()
+    }
+
+    func handlePresenterAction(_ action: PresenterWindowAction) {
+        switch action {
+        case .previousSlide:
+            viewModel.previousSlide()
+        case .nextSlide:
+            viewModel.nextSlide()
+        case .toggleSession:
+            viewModel.toggleRealtimeSession()
+        case .closed:
+            break
+        }
+    }
+
+    private func makeState() -> PresenterWindowState {
+        PresenterWindowState(
+            slide: viewModel.deck?.slide(at: viewModel.currentSlideIndex),
+            highlightPhrases: viewModel.currentSlideHighlightPhrases,
+            markedSegmentIndices: viewModel.currentSlideMarkedSegmentIndices,
+            sessionPhase: viewModel.sessionPhase,
+            isSessionTransitioning: viewModel.isSessionTransitioning,
+            canToggleSession: viewModel.canToggleSession
+        )
     }
 }

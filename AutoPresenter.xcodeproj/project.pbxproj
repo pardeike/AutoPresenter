@@ -3,50 +3,43 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 63;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
-		1D1E302D4A8D4A8B9C3DB001 /* presentation.sample.json in Resources */ = {isa = PBXBuildFile; fileRef = 1D1E302D4A8D4A8B9C3DB011 /* presentation.sample.json */; };
-		1D1E302D4A8D4A8B9C3DB002 /* realtime-bridge.js in Resources */ = {isa = PBXBuildFile; fileRef = 1D1E302D4A8D4A8B9C3DB012 /* realtime-bridge.js */; };
-			30248696E67240B3C05804E8 /* RealtimeWebBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 673814A6B3F6AF99F63CE46C /* RealtimeWebBridge.swift */; };
-			359B9488562BE90579E39899 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63FBD596FC2031E285BDD70 /* AppViewModel.swift */; };
-			4E11D6B3C22ED5DBF3F8BB9F /* PresentationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A7DDDD6F6CA2184B45FABAD /* PresentationModels.swift */; };
-			527D5CF3B11843666394CBA2 /* SlideCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A64E77C8CFD8521357D15B6 /* SlideCommand.swift */; };
-			551BE548B142CB557E79D082 /* AutoPresenterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36DD5B940AF001B29F7255BD /* AutoPresenterApp.swift */; };
-			6AB8DE148E687B5F99CB472E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA022A25C7397D5E115B8FB6 /* ContentView.swift */; };
-			6F02B91A8EE44E0CACAA60F2 /* PresenterWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D24F74D4F7C94D2B87731524 /* PresenterWindow.swift */; };
-			B4BA98B62F729709AB864C68 /* OpenAIRealtimeTokenService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */; };
-			C5CA1CC93AD0671333AC73A2 /* RealtimeWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 979151427032FD08DB4317BB /* RealtimeWebView.swift */; };
-			D11959C722627409D682A8C1 /* CommandSafetyGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */; };
+		30248696E67240B3C05804E8 /* RealtimeWebBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 673814A6B3F6AF99F63CE46C /* RealtimeWebBridge.swift */; };
+		359B9488562BE90579E39899 /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63FBD596FC2031E285BDD70 /* AppViewModel.swift */; };
+		3854A94263254CFBF329CB3B /* PresenterWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC7B0E2124320E2E704B08DB /* PresenterWindow.swift */; };
+		4E11D6B3C22ED5DBF3F8BB9F /* PresentationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A7DDDD6F6CA2184B45FABAD /* PresentationModels.swift */; };
+		527D5CF3B11843666394CBA2 /* SlideCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A64E77C8CFD8521357D15B6 /* SlideCommand.swift */; };
+		551BE548B142CB557E79D082 /* AutoPresenterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36DD5B940AF001B29F7255BD /* AutoPresenterApp.swift */; };
+		6AB8DE148E687B5F99CB472E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA022A25C7397D5E115B8FB6 /* ContentView.swift */; };
+		B4BA98B62F729709AB864C68 /* OpenAIRealtimeTokenService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */; };
+		C1D2E3F40516273849A5B6C7 /* RealtimeWebViewHostWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E2F30415263748A9B5C6D7 /* RealtimeWebViewHostWindow.swift */; };
+		C5CA1CC93AD0671333AC73A2 /* RealtimeWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 979151427032FD08DB4317BB /* RealtimeWebView.swift */; };
+		D11959C722627409D682A8C1 /* CommandSafetyGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */; };
+		D93474E9906732722F208D66 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56BEB7603582D39D2FC92F4F /* AppSettings.swift */; };
+		F9A3B4A9D6E95A6986207367 /* SafetyGateSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 325DC08317C1869106D99182 /* SafetyGateSettingsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		0857895784714A3EA3759EFD /* AutoPresenter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AutoPresenter.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		1D1E302D4A8D4A8B9C3DB011 /* presentation.sample.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "presentation.sample.json"; sourceTree = "<group>"; };
-		1D1E302D4A8D4A8B9C3DB012 /* realtime-bridge.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = "realtime-bridge.js"; sourceTree = "<group>"; };
+		325DC08317C1869106D99182 /* SafetyGateSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyGateSettingsView.swift; sourceTree = "<group>"; };
 		36DD5B940AF001B29F7255BD /* AutoPresenterApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoPresenterApp.swift; sourceTree = "<group>"; };
 		3A64E77C8CFD8521357D15B6 /* SlideCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideCommand.swift; sourceTree = "<group>"; };
+		56BEB7603582D39D2FC92F4F /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		673814A6B3F6AF99F63CE46C /* RealtimeWebBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeWebBridge.swift; sourceTree = "<group>"; };
 		7A7DDDD6F6CA2184B45FABAD /* PresentationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresentationModels.swift; sourceTree = "<group>"; };
-			92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSafetyGate.swift; sourceTree = "<group>"; };
-			979151427032FD08DB4317BB /* RealtimeWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeWebView.swift; sourceTree = "<group>"; };
-			AA022A25C7397D5E115B8FB6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-			D24F74D4F7C94D2B87731524 /* PresenterWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenterWindow.swift; sourceTree = "<group>"; };
-			E63FBD596FC2031E285BDD70 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
-			E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIRealtimeTokenService.swift; sourceTree = "<group>"; };
+		92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSafetyGate.swift; sourceTree = "<group>"; };
+		979151427032FD08DB4317BB /* RealtimeWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeWebView.swift; sourceTree = "<group>"; };
+		AA022A25C7397D5E115B8FB6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		D1E2F30415263748A9B5C6D7 /* RealtimeWebViewHostWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeWebViewHostWindow.swift; sourceTree = "<group>"; };
+		DC7B0E2124320E2E704B08DB /* PresenterWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenterWindow.swift; sourceTree = "<group>"; };
+		E63FBD596FC2031E285BDD70 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
+		E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIRealtimeTokenService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
-		1D1E302D4A8D4A8B9C3DB021 /* Resources */ = {
-			isa = PBXGroup;
-			children = (
-				1D1E302D4A8D4A8B9C3DB011 /* presentation.sample.json */,
-				1D1E302D4A8D4A8B9C3DB012 /* realtime-bridge.js */,
-			);
-			path = AutoPresenter/Resources;
-			sourceTree = "<group>";
-		};
 		20335D92A8444C3AEF34E87C /* Models */ = {
 			isa = PBXGroup;
 			children = (
@@ -56,21 +49,21 @@
 			path = Models;
 			sourceTree = "<group>";
 		};
-			3ADBC5111671C7364D94131E /* Views */ = {
-				isa = PBXGroup;
-				children = (
-					AA022A25C7397D5E115B8FB6 /* ContentView.swift */,
-					D24F74D4F7C94D2B87731524 /* PresenterWindow.swift */,
-					979151427032FD08DB4317BB /* RealtimeWebView.swift */,
-				);
-				path = Views;
-				sourceTree = "<group>";
+		3ADBC5111671C7364D94131E /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				AA022A25C7397D5E115B8FB6 /* ContentView.swift */,
+				DC7B0E2124320E2E704B08DB /* PresenterWindow.swift */,
+				979151427032FD08DB4317BB /* RealtimeWebView.swift */,
+				325DC08317C1869106D99182 /* SafetyGateSettingsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
 		};
 		52217B819FCFADFC3C75960D = {
 			isa = PBXGroup;
 			children = (
 				70DFFE97F25AA9DAB752FDF1 /* Sources */,
-				1D1E302D4A8D4A8B9C3DB021 /* Resources */,
 				6AB46EBE1191186DDB7A5528 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -78,6 +71,7 @@
 		66BBE4705B45BCC7FA211F30 /* ViewModels */ = {
 			isa = PBXGroup;
 			children = (
+				56BEB7603582D39D2FC92F4F /* AppSettings.swift */,
 				E63FBD596FC2031E285BDD70 /* AppViewModel.swift */,
 			);
 			path = ViewModels;
@@ -110,6 +104,7 @@
 				92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */,
 				E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */,
 				673814A6B3F6AF99F63CE46C /* RealtimeWebBridge.swift */,
+				D1E2F30415263748A9B5C6D7 /* RealtimeWebViewHostWindow.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -130,7 +125,6 @@
 			buildConfigurationList = 50DF44832E5BE0C93A4A2CF3 /* Build configuration list for PBXNativeTarget "AutoPresenter" */;
 			buildPhases = (
 				43E0CF9420C3C15E7DCA8387 /* Sources */,
-				1D1E302D4A8D4A8B9C3DB031 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -150,7 +144,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 2620;
+				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					FCEA3D8F97BFE609FEA8D792 = {
 						ProvisioningStyle = Automatic;
@@ -167,6 +161,7 @@
 			);
 			mainGroup = 52217B819FCFADFC3C75960D;
 			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -175,34 +170,25 @@
 		};
 /* End PBXProject section */
 
-/* Begin PBXResourcesBuildPhase section */
-		1D1E302D4A8D4A8B9C3DB031 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				1D1E302D4A8D4A8B9C3DB001 /* presentation.sample.json in Resources */,
-				1D1E302D4A8D4A8B9C3DB002 /* realtime-bridge.js in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXResourcesBuildPhase section */
-
 /* Begin PBXSourcesBuildPhase section */
 		43E0CF9420C3C15E7DCA8387 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D93474E9906732722F208D66 /* AppSettings.swift in Sources */,
 				359B9488562BE90579E39899 /* AppViewModel.swift in Sources */,
 				551BE548B142CB557E79D082 /* AutoPresenterApp.swift in Sources */,
-					D11959C722627409D682A8C1 /* CommandSafetyGate.swift in Sources */,
-					6AB8DE148E687B5F99CB472E /* ContentView.swift in Sources */,
-					B4BA98B62F729709AB864C68 /* OpenAIRealtimeTokenService.swift in Sources */,
-					4E11D6B3C22ED5DBF3F8BB9F /* PresentationModels.swift in Sources */,
-					6F02B91A8EE44E0CACAA60F2 /* PresenterWindow.swift in Sources */,
-					30248696E67240B3C05804E8 /* RealtimeWebBridge.swift in Sources */,
-					C5CA1CC93AD0671333AC73A2 /* RealtimeWebView.swift in Sources */,
-					527D5CF3B11843666394CBA2 /* SlideCommand.swift in Sources */,
-				);
+				D11959C722627409D682A8C1 /* CommandSafetyGate.swift in Sources */,
+				6AB8DE148E687B5F99CB472E /* ContentView.swift in Sources */,
+				B4BA98B62F729709AB864C68 /* OpenAIRealtimeTokenService.swift in Sources */,
+				4E11D6B3C22ED5DBF3F8BB9F /* PresentationModels.swift in Sources */,
+				3854A94263254CFBF329CB3B /* PresenterWindow.swift in Sources */,
+				30248696E67240B3C05804E8 /* RealtimeWebBridge.swift in Sources */,
+				C1D2E3F40516273849A5B6C7 /* RealtimeWebViewHostWindow.swift in Sources */,
+				C5CA1CC93AD0671333AC73A2 /* RealtimeWebView.swift in Sources */,
+				F9A3B4A9D6E95A6986207367 /* SafetyGateSettingsView.swift in Sources */,
+				527D5CF3B11843666394CBA2 /* SlideCommand.swift in Sources */,
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
@@ -214,7 +200,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				DEAD_CODE_STRIPPING = YES;
 				INFOPLIST_FILE = AutoPresenter/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -232,7 +217,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				DEAD_CODE_STRIPPING = YES;
 				INFOPLIST_FILE = AutoPresenter/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -278,12 +262,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = W65292CD8T;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
@@ -298,7 +279,6 @@
 				OTHER_SWIFT_FLAGS = "$(inherited) -strict-concurrency=complete -warnings-as-errors";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_STRICT_CONCURRENCY = complete;
@@ -342,12 +322,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = W65292CD8T;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -369,7 +346,6 @@
 				OTHER_SWIFT_FLAGS = "$(inherited) -strict-concurrency=complete -warnings-as-errors";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_STRICT_CONCURRENCY = complete;

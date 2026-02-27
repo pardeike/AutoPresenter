@@ -74,15 +74,18 @@ final class RealtimeWebBridge: NSObject {
     func stopSession() async throws {
         try await waitForBridgeReady()
         let script = """
-        (() => {
-          Promise.resolve(window.AutoPresenter.stopSession()).catch((error) => {
+        (async () => {
+          try {
+            await window.AutoPresenter.stopSession();
+            return "ok";
+          } catch (error) {
             window.webkit?.messageHandlers?.\(messageHandlerName)?.postMessage({
               kind: "log",
               level: "error",
               message: "window.AutoPresenter.stopSession failed: " + (error?.message ?? String(error))
             });
-          });
-          return "ok";
+            throw error;
+          }
         })();
         """
         _ = try await webView.evaluateJavaScript(script)
@@ -138,7 +141,6 @@ final class RealtimeWebBridge: NSObject {
           return "ok";
         })();
         """
-
         _ = try await webView.evaluateJavaScript(script)
     }
 

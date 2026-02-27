@@ -1,29 +1,71 @@
 import AppKit
+import Combine
 import SwiftUI
+
+struct PresenterWindowState: Sendable {
+    let slide: PresentationSlide?
+    let highlightPhrases: [String]
+    let markedSegmentIndices: Set<Int>
+    let sessionPhase: RealtimeSessionPhase
+    let isSessionTransitioning: Bool
+    let canToggleSession: Bool
+
+    static let empty = PresenterWindowState(
+        slide: nil,
+        highlightPhrases: [],
+        markedSegmentIndices: [],
+        sessionPhase: .idle,
+        isSessionTransitioning: false,
+        canToggleSession: true
+    )
+}
+
+enum PresenterWindowAction: Sendable {
+    case previousSlide
+    case nextSlide
+    case toggleSession
+    case closed
+}
+
+@MainActor
+protocol PresenterWindowBridge: AnyObject {
+    var initialState: PresenterWindowState { get }
+    var stateUpdates: AnyPublisher<PresenterWindowState, Never> { get }
+    func handlePresenterAction(_ action: PresenterWindowAction)
+}
 
 @MainActor
 final class PresenterWindowManager: NSObject, NSWindowDelegate {
-    private var window: EscapeClosableWindow?
+    private static let minimumWindowSize = NSSize(width: 640, height: 480)
 
-    func show(viewModel: AppViewModel) {
+    private var window: EscapeClosableWindow?
+    private var presenterStateModel: PresenterStateModel?
+    private weak var currentBridge: (any PresenterWindowBridge)?
+
+    func show(bridge: any PresenterWindowBridge) {
+        currentBridge = bridge
+        let stateModel = PresenterStateModel(bridge: bridge)
+        presenterStateModel = stateModel
+
         if let window {
             if let hostingController = window.contentViewController as? NSHostingController<PresenterRootView> {
                 hostingController.rootView = PresenterRootView(
-                    viewModel: viewModel,
+                    stateModel: stateModel,
                     onExit: { [weak self] in
                         self?.close()
                     }
                 )
             }
-            configureKeyHandling(for: window, viewModel: viewModel)
+            configureKeyHandling(for: window, stateModel: stateModel)
+            enforceMinimumSize(on: window)
             window.makeKeyAndOrderFront(nil)
-            if !window.styleMask.contains(.fullScreen) {
-                window.toggleFullScreen(nil)
-            }
             return
         }
 
-        let initialRect = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let minimumWindowSize = Self.minimumWindowSize
+        var initialRect = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        initialRect.size.width = max(initialRect.size.width, minimumWindowSize.width)
+        initialRect.size.height = max(initialRect.size.height, minimumWindowSize.height)
         let presenterWindow = EscapeClosableWindow(
             contentRect: initialRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -36,62 +78,97 @@ final class PresenterWindowManager: NSObject, NSWindowDelegate {
         presenterWindow.collectionBehavior = [.fullScreenPrimary]
         presenterWindow.backgroundColor = .black
         presenterWindow.isReleasedWhenClosed = false
+        presenterWindow.minSize = minimumWindowSize
         presenterWindow.delegate = self
+        enforceMinimumSize(on: presenterWindow)
         presenterWindow.center()
 
         let hostingController = NSHostingController(
             rootView: PresenterRootView(
-                viewModel: viewModel,
+                stateModel: stateModel,
                 onExit: { [weak self] in
                     self?.close()
                 }
             )
         )
         presenterWindow.contentViewController = hostingController
-        configureKeyHandling(for: presenterWindow, viewModel: viewModel)
+        configureKeyHandling(for: presenterWindow, stateModel: stateModel)
         window = presenterWindow
 
         presenterWindow.makeKeyAndOrderFront(nil)
-        DispatchQueue.main.async { [weak presenterWindow] in
-            guard let presenterWindow, presenterWindow.isVisible else { return }
-            if !presenterWindow.styleMask.contains(.fullScreen) {
-                presenterWindow.toggleFullScreen(nil)
-            }
+    }
+
+    private func enforceMinimumSize(on window: NSWindow) {
+        let minimumWindowSize = Self.minimumWindowSize
+        window.minSize = minimumWindowSize
+        if window.frame.size.width < minimumWindowSize.width || window.frame.size.height < minimumWindowSize.height {
+            var correctedFrame = window.frame
+            correctedFrame.size.width = max(correctedFrame.size.width, minimumWindowSize.width)
+            correctedFrame.size.height = max(correctedFrame.size.height, minimumWindowSize.height)
+            window.setFrame(correctedFrame, display: true, animate: false)
         }
     }
 
     func close() {
+        currentBridge?.handlePresenterAction(.closed)
+        currentBridge = nil
+        presenterStateModel = nil
         guard let window else { return }
         window.close()
         self.window = nil
     }
 
     func windowWillClose(_ notification: Notification) {
+        currentBridge?.handlePresenterAction(.closed)
+        currentBridge = nil
+        presenterStateModel = nil
         window = nil
     }
 
-    private func configureKeyHandling(for window: EscapeClosableWindow, viewModel: AppViewModel) {
-        window.onKeyDown = { [weak self, weak viewModel] event in
-            guard let self, let viewModel else { return false }
-            return self.handleKeyDown(event, viewModel: viewModel)
+    private func configureKeyHandling(for window: EscapeClosableWindow, stateModel: PresenterStateModel) {
+        window.onKeyDown = { [weak self, weak stateModel] event in
+            guard let self, let stateModel else { return false }
+            return self.handleKeyDown(event, stateModel: stateModel)
         }
     }
 
-    private func handleKeyDown(_ event: NSEvent, viewModel: AppViewModel) -> Bool {
+    private func handleKeyDown(_ event: NSEvent, stateModel: PresenterStateModel) -> Bool {
         switch event.keyCode {
         case 123: // Left arrow
-            viewModel.previousSlide()
+            stateModel.send(.previousSlide)
             return true
         case 124: // Right arrow
-            viewModel.nextSlide()
+            stateModel.send(.nextSlide)
             return true
         case 49: // Space
             guard !event.isARepeat else { return true }
-            viewModel.toggleRealtimeSessionFromPresenter()
+            stateModel.send(.toggleSession)
             return true
         default:
             return false
         }
+    }
+}
+
+@MainActor
+private final class PresenterStateModel: ObservableObject {
+    @Published private(set) var state: PresenterWindowState
+
+    private weak var bridge: (any PresenterWindowBridge)?
+    private var cancellable: AnyCancellable?
+
+    init(bridge: any PresenterWindowBridge) {
+        self.bridge = bridge
+        state = bridge.initialState
+        cancellable = bridge.stateUpdates
+            .receive(on: RunLoop.main)
+            .sink { [weak self] newState in
+                self?.state = newState
+            }
+    }
+
+    func send(_ action: PresenterWindowAction) {
+        bridge?.handlePresenterAction(action)
     }
 }
 
@@ -115,10 +192,12 @@ private final class EscapeClosableWindow: NSWindow {
 }
 
 private struct PresenterRootView: View {
-    @ObservedObject var viewModel: AppViewModel
+    @ObservedObject var stateModel: PresenterStateModel
     let onExit: () -> Void
 
     var body: some View {
+        let state = stateModel.state
+
         ZStack {
             LinearGradient(
                 colors: [
@@ -130,13 +209,13 @@ private struct PresenterRootView: View {
             )
             .ignoresSafeArea()
 
-            if let slide = viewModel.deck?.slide(at: viewModel.currentSlideIndex) {
+            if let slide = state.slide {
                 PresenterSlideView(
                     slide: slide,
-                    highlightPhrases: viewModel.currentSlideHighlightPhrases,
-                    markedSegmentIndices: viewModel.currentSlideMarkedSegmentIndices
+                    highlightPhrases: state.highlightPhrases,
+                    markedSegmentIndices: state.markedSegmentIndices
                 )
-            } else {
+            } else if !AppBuildFlags.strictFullscreenAudienceMode {
                 VStack(spacing: 16) {
                     Text("No slide loaded")
                         .font(.system(size: 56, weight: .bold, design: .rounded))
@@ -146,11 +225,16 @@ private struct PresenterRootView: View {
                 }
                 .padding(80)
             }
+
         }
         .overlay(alignment: .bottomTrailing) {
-            ListeningIndicatorDot(
-                isSessionActive: viewModel.isSessionActive,
-                isSpeechDetected: viewModel.isSpeechDetected
+            PresenterSessionControl(
+                phase: state.sessionPhase,
+                isBusy: state.isSessionTransitioning,
+                isEnabled: state.canToggleSession,
+                onToggle: {
+                    stateModel.send(.toggleSession)
+                }
             )
             .padding(.trailing, 24)
             .padding(.bottom, 20)
@@ -159,36 +243,66 @@ private struct PresenterRootView: View {
     }
 }
 
-private struct ListeningIndicatorDot: View {
-    let isSessionActive: Bool
-    let isSpeechDetected: Bool
+private struct PresenterSessionControl: View {
+    let phase: RealtimeSessionPhase
+    let isBusy: Bool
+    let isEnabled: Bool
+    let onToggle: () -> Void
 
-    private var fillColor: Color {
-        if isSpeechDetected {
-            return Color(red: 0.98, green: 0.24, blue: 0.24)
-        }
-        if isSessionActive {
+    private var ledColor: Color {
+        switch phase {
+        case .idle:
+            return Color(red: 0.38, green: 0.17, blue: 0.17)
+        case .starting, .connecting:
+            return Color(red: 0.95, green: 0.65, blue: 0.16)
+        case .listening:
             return Color(red: 0.68, green: 0.23, blue: 0.23)
+        case .speaking:
+            return Color(red: 0.98, green: 0.24, blue: 0.24)
+        case .processing:
+            return Color(red: 0.90, green: 0.52, blue: 0.16)
+        case .stopped:
+            return Color(red: 0.32, green: 0.32, blue: 0.34)
+        case .error:
+            return Color(red: 0.85, green: 0.19, blue: 0.19)
         }
-        return Color(red: 0.38, green: 0.17, blue: 0.17)
     }
 
-    private var dotOpacity: Double {
-        isSessionActive ? 0.96 : 0.42
+    private var isActive: Bool {
+        phase.showsActiveRecordingControl
+    }
+
+    private var ringColor: Color {
+        isEnabled ? .white.opacity(0.58) : .white.opacity(0.30)
     }
 
     var body: some View {
-        Circle()
-            .fill(fillColor)
-            .frame(width: 16, height: 16)
-            .opacity(dotOpacity)
-            .overlay {
+        Button(action: onToggle) {
+            ZStack {
                 Circle()
-                    .strokeBorder(.white.opacity(0.26), lineWidth: 1)
+                    .fill(.black.opacity(0.20))
+                    .frame(width: 38, height: 38)
+                    .overlay {
+                        Circle()
+                            .strokeBorder(ringColor, lineWidth: 2)
+                    }
+
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white.opacity(0.9))
+                } else {
+                    Circle()
+                        .fill(ledColor)
+                        .frame(width: isActive ? 11 : 9, height: isActive ? 11 : 9)
+                        .shadow(color: ledColor.opacity(0.45), radius: phase == .speaking ? 8 : 3, x: 0, y: 0)
+                }
             }
-            .shadow(color: fillColor.opacity(0.45), radius: isSpeechDetected ? 7 : 3, x: 0, y: 0)
-            .animation(.easeOut(duration: 0.12), value: isSpeechDetected)
-            .animation(.easeOut(duration: 0.18), value: isSessionActive)
+            .animation(.easeOut(duration: 0.12), value: phase)
+            .animation(.easeOut(duration: 0.12), value: isBusy)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
     }
 }
 
@@ -230,9 +344,11 @@ private struct PresenterSlideView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 18) {
             if segmentBuckets.title.isEmpty {
-                Text("Untitled")
-                    .font(.system(size: 68, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
+                if !AppBuildFlags.strictFullscreenAudienceMode {
+                    Text("Untitled")
+                        .font(.system(size: 68, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                }
             } else {
                 ForEach(segmentBuckets.title, id: \.index) { segment in
                     segmentText(segment)
@@ -300,19 +416,21 @@ private struct PresenterSlideView: View {
                 presenterColumn(
                     titleSegments: segmentBuckets.leftTitle,
                     bulletSegments: segmentBuckets.leftBullets,
-                    fallbackTitle: "Left"
+                    fallbackTitle: AppBuildFlags.strictFullscreenAudienceMode ? nil : "Left"
                 )
                 presenterColumn(
                     titleSegments: segmentBuckets.rightTitle,
                     bulletSegments: segmentBuckets.rightBullets,
-                    fallbackTitle: "Right"
+                    fallbackTitle: AppBuildFlags.strictFullscreenAudienceMode ? nil : "Right"
                 )
             }
         case .title, .bullets, .unknown:
             if segmentBuckets.bodyBullets.isEmpty {
-                Text("No bullet content")
-                    .font(.system(size: 34, weight: .regular, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.65))
+                if !AppBuildFlags.strictFullscreenAudienceMode {
+                    Text("No bullet content")
+                        .font(.system(size: 34, weight: .regular, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.65))
+                }
             } else {
                 ForEach(segmentBuckets.bodyBullets, id: \.index) { segment in
                     HStack(alignment: .top, spacing: 12) {
@@ -333,13 +451,15 @@ private struct PresenterSlideView: View {
     private func presenterColumn(
         titleSegments: [SlideMarkSegment],
         bulletSegments: [SlideMarkSegment],
-        fallbackTitle: String
+        fallbackTitle: String?
     ) -> some View {
         VStack(alignment: .leading, spacing: 20) {
             if titleSegments.isEmpty {
-                Text(fallbackTitle)
-                    .font(.system(size: 42, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
+                if let fallbackTitle {
+                    Text(fallbackTitle)
+                        .font(.system(size: 42, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                }
             } else {
                 ForEach(titleSegments, id: \.index) { segment in
                     segmentText(segment)
@@ -349,9 +469,11 @@ private struct PresenterSlideView: View {
             }
 
             if bulletSegments.isEmpty {
-                Text("No bullet content")
-                    .font(.system(size: 34, weight: .regular, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.65))
+                if !AppBuildFlags.strictFullscreenAudienceMode {
+                    Text("No bullet content")
+                        .font(.system(size: 34, weight: .regular, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.65))
+                }
             } else {
                 ForEach(bulletSegments, id: \.index) { segment in
                     HStack(alignment: .top, spacing: 12) {

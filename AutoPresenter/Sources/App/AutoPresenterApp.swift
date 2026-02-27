@@ -3,10 +3,16 @@ import UniformTypeIdentifiers
 
 @main
 struct AutoPresenterApp: App {
+    @StateObject private var settings = AppSettings()
+
     var body: some Scene {
         DocumentGroup(newDocument: PresentationDeckDocument()) { file in
-            DocumentWindowContent(document: file.$document, fileURL: file.fileURL)
+            DocumentWindowContent(document: file.$document, fileURL: file.fileURL, settings: settings)
                 .frame(minWidth: 1100, minHeight: 760)
+        }
+
+        Settings {
+            SafetyGateSettingsView(settings: settings)
         }
     }
 }
@@ -15,8 +21,14 @@ private struct DocumentWindowContent: View {
     @Binding var document: PresentationDeckDocument
     let fileURL: URL?
 
-    @StateObject private var viewModel = AppViewModel(bootstrapExampleDeck: false)
+    @StateObject private var viewModel: AppViewModel
     @State private var hasLoadedInitialDocument = false
+
+    init(document: Binding<PresentationDeckDocument>, fileURL: URL?, settings: AppSettings) {
+        _document = document
+        self.fileURL = fileURL
+        _viewModel = StateObject(wrappedValue: AppViewModel(settings: settings, bootstrapExampleDeck: false))
+    }
 
     var body: some View {
         ContentView(viewModel: viewModel)
@@ -74,7 +86,7 @@ private struct PresentationDeckDocument: FileDocument {
               "title": "New Presentation",
               "bullets": [
                 "Open a JSON deck from File > Open.",
-                "Use Start Realtime when your deck is loaded."
+                "Use the record control when your deck is loaded."
               ]
             }
           ]

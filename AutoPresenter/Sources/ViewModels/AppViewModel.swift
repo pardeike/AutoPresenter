@@ -4,6 +4,68 @@ import Combine
 import Foundation
 import WebKit
 
+enum AppBuildFlags {
+    // Build-time switch for main-window diagnostics UI.
+    static let debugTextLogInMainWindow = false
+    static let strictFullscreenAudienceMode = true
+}
+
+enum RealtimeSessionPhase: String, Sendable {
+    case idle
+    case starting
+    case connecting
+    case listening
+    case speaking
+    case processing
+    case stopped
+    case error
+
+    var displayLabel: String {
+        switch self {
+        case .idle:
+            return "Idle"
+        case .starting:
+            return "Starting"
+        case .connecting:
+            return "Connecting"
+        case .listening:
+            return "Listening"
+        case .speaking:
+            return "Speaking"
+        case .processing:
+            return "Processing"
+        case .stopped:
+            return "Stopped"
+        case .error:
+            return "Error"
+        }
+    }
+
+    var showsActiveRecordingControl: Bool {
+        switch self {
+        case .starting, .connecting, .listening, .speaking, .processing:
+            return true
+        case .idle, .stopped, .error:
+            return false
+        }
+    }
+}
+
+enum ActivityFeedLevel: String, Sendable {
+    case info
+    case success
+    case warning
+    case error
+}
+
+struct ActivityFeedEntry: Identifiable, Sendable {
+    let id = UUID()
+    let timestamp: Date
+    let title: String
+    let detail: String?
+    let level: ActivityFeedLevel
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     private static let logNumberLocale = Locale(identifier: "en_US_POSIX")
@@ -14,14 +76,12 @@ final class AppViewModel: ObservableObject {
 
     @Published var currentSlideIndex: Int = 1
 
-    @Published var confidenceThreshold: Double = 0.70
-    @Published var cooldownSeconds: Double = 1.20
-    @Published var dwellSeconds: Double = 0.00
-
     @Published private(set) var deck: PresentationDeck?
     @Published private(set) var loadedDeckURL: URL?
     @Published private(set) var isSessionActive = false
     @Published private(set) var isStarting = false
+    @Published private(set) var isStopping = false
+    @Published private(set) var sessionPhase: RealtimeSessionPhase = .idle
     @Published private(set) var connectionState = "idle"
     @Published private(set) var statusLine = "Ready"
     @Published private(set) var isSpeechDetected = false
@@ -30,11 +90,15 @@ final class AppViewModel: ObservableObject {
 
     let bridge: RealtimeWebBridge
 
+    private let settings: AppSettings
     private let tokenService = OpenAIRealtimeTokenService()
     private let safetyGate = CommandSafetyGate()
+    private let webViewHost = RealtimeWebViewHostWindow()
     private let maxLogEntries = 600
+    private let maxActivityEntries = 300
     private let logFileURL = AppViewModel.resolveLogFileURL()
     @Published private var logEntries: [String] = []
+    @Published private var activityEntries: [ActivityFeedEntry] = []
     private var realtimeActivityToken: NSObjectProtocol?
     private var didReportLogFileError = false
 
@@ -44,11 +108,13 @@ final class AppViewModel: ObservableObject {
         return decoder
     }()
 
-    init(bootstrapExampleDeck: Bool = true) {
+    init(settings: AppSettings, bootstrapExampleDeck: Bool = true) {
+        self.settings = settings
         bridge = RealtimeWebBridge()
         bridge.onMessage = { [weak self] payload in
             self?.handleBridgePayload(payload)
         }
+        webViewHost.attach(bridge.webView)
         prepareLogFileIfNeeded()
         loadAPIKeyFromKnownLocations()
         if bootstrapExampleDeck {
@@ -58,6 +124,7 @@ final class AppViewModel: ObservableObject {
             appendLog("Mirroring command log to \(logFileURL.path)")
         }
         appendLog("AutoPresenter initialized")
+        appendActivity("AutoPresenter ready")
     }
 
     var deckSlideCount: Int {
@@ -81,12 +148,28 @@ final class AppViewModel: ObservableObject {
         return slide.title
     }
 
-    var webView: WKWebView {
-        bridge.webView
-    }
-
     var logLines: [String] {
         logEntries
+    }
+
+    var activityFeed: [ActivityFeedEntry] {
+        activityEntries
+    }
+
+    var usesDebugTextLogInMainWindow: Bool {
+        AppBuildFlags.debugTextLogInMainWindow
+    }
+
+    var canToggleSession: Bool {
+        !isStarting && !isStopping
+    }
+
+    var isRecordingControlActive: Bool {
+        sessionPhase.showsActiveRecordingControl
+    }
+
+    var isSessionTransitioning: Bool {
+        isStopping || sessionPhase == .starting || sessionPhase == .connecting
     }
 
     var currentSlideHighlightPhrases: [String] {
@@ -148,20 +231,38 @@ final class AppViewModel: ObservableObject {
 
     func previousSlide() {
         guard let deck else { return }
+        let suppressLoggingForArrowKey = isCurrentEventArrowKeyNavigation()
+        let previous = currentSlideIndex
         currentSlideIndex = deck.clampedSlideIndex(currentSlideIndex - 1)
-        appendLog("Slide set to \(currentSlideIndex)")
-        pushContextUpdate(reason: "manual previous")
+        guard currentSlideIndex != previous else { return }
+        if !suppressLoggingForArrowKey {
+            appendLog("Slide set to \(currentSlideIndex)")
+            appendActivity("Moved to slide \(currentSlideIndex)", detail: "Manual previous")
+        }
+        pushContextUpdate(reason: "manual previous", shouldLogResult: !suppressLoggingForArrowKey)
     }
 
     func nextSlide() {
         guard let deck else { return }
+        let suppressLoggingForArrowKey = isCurrentEventArrowKeyNavigation()
+        let previous = currentSlideIndex
         currentSlideIndex = deck.clampedSlideIndex(currentSlideIndex + 1)
-        appendLog("Slide set to \(currentSlideIndex)")
-        pushContextUpdate(reason: "manual next")
+        guard currentSlideIndex != previous else { return }
+        if !suppressLoggingForArrowKey {
+            appendLog("Slide set to \(currentSlideIndex)")
+            appendActivity("Moved to slide \(currentSlideIndex)", detail: "Manual next")
+        }
+        pushContextUpdate(reason: "manual next", shouldLogResult: !suppressLoggingForArrowKey)
     }
 
     func applyContextUpdate() {
+        guard isSessionActive else {
+            appendActivity("Context refresh skipped", detail: "Stream is not active", level: .warning)
+            appendLog("Context update skipped: stream inactive")
+            return
+        }
         pushContextUpdate(reason: "manual refresh")
+        appendActivity("Context refreshed", detail: "Current slide instructions sent")
     }
 
     func clearLog() {
@@ -170,30 +271,52 @@ final class AppViewModel: ObservableObject {
         appendLog("Command log cleared")
     }
 
+    func clearVisibleFeed() {
+        if usesDebugTextLogInMainWindow {
+            clearLog()
+        } else {
+            activityEntries.removeAll(keepingCapacity: true)
+        }
+    }
+
     func startSession() async {
         guard !isStarting else { return }
+        guard !isSessionActive else {
+            statusLine = "Stream already active"
+            appendActivity("Stream already active")
+            return
+        }
         guard let deck else {
             statusLine = "Load a presentation deck first"
+            sessionPhase = .idle
             appendLog("Start blocked: no deck loaded")
+            appendActivity("Start blocked", detail: "Load a deck first", level: .warning)
             return
         }
 
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else {
             statusLine = "OpenAI API key missing"
+            sessionPhase = .idle
             appendLog("Start blocked: API key is empty")
+            appendActivity("Start blocked", detail: "OpenAI API key missing", level: .warning)
             return
         }
 
         let micGranted = await requestMicrophoneAccessIfNeeded()
         guard micGranted else {
             statusLine = "Microphone permission denied"
+            sessionPhase = .idle
             appendLog("Start blocked: microphone permission denied")
+            appendActivity("Start blocked", detail: "Microphone permission denied", level: .warning)
             return
         }
 
         isStarting = true
         isSpeechDetected = false
+        sessionPhase = .starting
+        statusLine = "Starting stream..."
+        appendActivity("Starting stream")
         defer { isStarting = false }
         beginRealtimeActivityIfNeeded()
 
@@ -203,33 +326,48 @@ final class AppViewModel: ObservableObject {
             try await bridge.startSession(clientSecret: clientSecret, model: model, instructions: instructions)
             isSessionActive = true
             connectionState = "connecting"
-            statusLine = "Realtime session started"
-            appendLog("Realtime session request sent")
+            sessionPhase = .connecting
+            statusLine = "Connecting to Realtime..."
+            appendLog("Realtime start request sent")
+            appendActivity("Stream start requested", detail: "Connecting to Realtime")
         } catch {
             endRealtimeActivityIfNeeded()
             statusLine = "Start failed"
-            appendLog("Failed to start Realtime session: \(error.localizedDescription)")
+            sessionPhase = .error
+            appendLog("Failed to start Realtime stream: \(error.localizedDescription)")
+            appendActivity("Failed to start stream", detail: error.localizedDescription, level: .error)
         }
     }
 
     func stopSession() async {
+        guard !isStopping else { return }
+        isStopping = true
+        if isSessionActive || sessionPhase.showsActiveRecordingControl {
+            statusLine = "Stopping stream..."
+        }
+        defer { isStopping = false }
+
         do {
             try await bridge.stopSession()
         } catch {
-            appendLog("Stop session JS error: \(error.localizedDescription)")
+            appendLog("Stop stream JS error: \(error.localizedDescription)")
+            appendActivity("Stop warning", detail: error.localizedDescription, level: .warning)
         }
         isSessionActive = false
         isSpeechDetected = false
         connectionState = "stopped"
-        statusLine = "Session stopped"
+        sessionPhase = .stopped
+        statusLine = "Stream stopped"
         await safetyGate.reset()
         endRealtimeActivityIfNeeded()
-        appendLog("Realtime session stopped")
+        appendLog("Realtime stream stopped")
+        appendActivity("Stream stopped")
     }
 
-    func toggleRealtimeSessionFromPresenter() {
+    func toggleRealtimeSession() {
+        guard canToggleSession else { return }
         Task {
-            if isSessionActive {
+            if isRecordingControlActive || isSessionActive {
                 await stopSession()
             } else {
                 await startSession()
@@ -245,28 +383,29 @@ final class AppViewModel: ObservableObject {
 
         switch kind {
         case "log":
-            let level = (payload["level"] as? String ?? "info").uppercased()
+            let levelRaw = payload["level"] as? String ?? "info"
+            let level = levelRaw.uppercased()
             let message = payload["message"] as? String ?? "<no message>"
             appendLog("[bridge/\(level)] \(message)")
             if message == "Realtime data channel opened" {
-                statusLine = "Start speaking"
+                if isSessionActive {
+                    sessionPhase = .listening
+                }
+                statusLine = "Listening"
+                appendActivity("Microphone live", detail: "Speak naturally to drive slides")
+            } else if levelRaw.lowercased() == "error" {
+                sessionPhase = .error
+                statusLine = "Realtime bridge error"
+                appendActivity("Bridge error", detail: message, level: .error)
             }
         case "connection":
             let state = payload["state"] as? String ?? "unknown"
+            let previousState = connectionState
             connectionState = state
-            appendLog("WebRTC state: \(state)")
-            if state == "connected" {
-                statusLine = "Realtime connected"
-                isSessionActive = true
-                isSpeechDetected = false
-                beginRealtimeActivityIfNeeded()
+            if state != previousState {
+                appendLog("WebRTC state: \(state)")
             }
-            if state == "closed" || state == "failed" {
-                statusLine = "Realtime disconnected"
-                isSessionActive = false
-                isSpeechDetected = false
-                endRealtimeActivityIfNeeded()
-            }
+            applyConnectionStateUpdate(state: state, previousState: previousState)
         case "event":
             guard let event = payload["event"] as? [String: Any] else {
                 appendLog("Bridge event payload malformed")
@@ -277,6 +416,43 @@ final class AppViewModel: ObservableObject {
             break
         default:
             appendLog("Bridge payload kind not handled: \(kind)")
+        }
+    }
+
+    private func applyConnectionStateUpdate(state: String, previousState: String) {
+        switch state {
+        case "connected":
+            statusLine = "Listening"
+            isSessionActive = true
+            isSpeechDetected = false
+            sessionPhase = .listening
+            beginRealtimeActivityIfNeeded()
+            if previousState != "connected" {
+                appendActivity("Realtime connected")
+            }
+        case "closed":
+            statusLine = "Stream stopped"
+            isSessionActive = false
+            isSpeechDetected = false
+            sessionPhase = .stopped
+            endRealtimeActivityIfNeeded()
+            if previousState != "closed" {
+                appendActivity("Realtime disconnected")
+            }
+        case "failed":
+            statusLine = "Connection failed"
+            isSessionActive = false
+            isSpeechDetected = false
+            sessionPhase = .error
+            endRealtimeActivityIfNeeded()
+            if previousState != "failed" {
+                appendActivity("Realtime connection failed", level: .error)
+            }
+        default:
+            if (isSessionActive || isStarting) && (state == "connecting" || state == "new" || state == "checking" || state.hasPrefix("ice:")) {
+                sessionPhase = .connecting
+                statusLine = "Connecting to Realtime..."
+            }
         }
     }
 
@@ -300,12 +476,23 @@ final class AppViewModel: ObservableObject {
         case "error":
             let pretty = prettyJSONString(from: event) ?? "<unserializable error payload>"
             appendLog("Realtime error event: \(pretty)")
+            sessionPhase = .error
+            statusLine = "Realtime error"
+            appendActivity("Realtime error", detail: "Model reported an error", level: .error)
         case "input_audio_buffer.speech_started":
             appendLog("Speech detected")
             isSpeechDetected = true
+            if isSessionActive {
+                sessionPhase = .speaking
+                statusLine = "Speaking"
+            }
         case "input_audio_buffer.speech_stopped":
             appendLog("Speech ended")
             isSpeechDetected = false
+            if isSessionActive {
+                sessionPhase = .processing
+                statusLine = "Processing speech"
+            }
         default:
             break
         }
@@ -378,6 +565,15 @@ final class AppViewModel: ObservableObject {
     }
 
     private func evaluateCommand(_ command: SlideCommand, source: String) async {
+        defer {
+            if isSessionActive, !isSpeechDetected {
+                sessionPhase = .listening
+                if statusLine == "Processing speech" || statusLine == "Speaking" {
+                    statusLine = "Listening"
+                }
+            }
+        }
+
         let slideIndices = deck?.slideIndices ?? []
         let currentMarkableSegments = deck?.slide(at: currentSlideIndex)?.markableSegments() ?? []
 
@@ -400,9 +596,9 @@ final class AppViewModel: ObservableObject {
         applyHighlightPhrases(from: resolvedCommand, source: source)
 
         let policy = CommandPolicy(
-            confidenceThreshold: confidenceThreshold,
-            cooldownSeconds: cooldownSeconds,
-            dwellSeconds: dwellSeconds
+            confidenceThreshold: settings.confidenceThreshold,
+            cooldownSeconds: settings.cooldownSeconds,
+            dwellSeconds: settings.dwellSeconds
         )
 
         let decision = await safetyGate.evaluate(command: resolvedCommand, validSlideIndices: slideIndices, policy: policy)
@@ -410,19 +606,27 @@ final class AppViewModel: ObservableObject {
 
         if decision.accepted {
             appendLog("[ACCEPTED][\(source)] \(commandSummary) | \(decision.reason)")
-            applyAcceptedCommand(decision.command, source: source)
+            appendActivity(activitySummary(for: decision.command), level: .success)
+            await applyAcceptedCommand(decision.command, source: source)
         } else if decision.command.action == .stay && decision.reason == "model requested stay" {
             statusLine = "Model hold: no slide change"
             appendLog("[NOOP][\(source)] \(commandSummary) | \(decision.reason)")
+            appendActivity("AI held position", detail: "No slide change")
         } else {
             appendLog("[REJECTED][\(source)] \(commandSummary) | \(decision.reason)")
+            appendActivity(
+                "AI action rejected",
+                detail: "Reason: \(friendlyDecisionReason(decision.reason))",
+                level: .warning
+            )
         }
     }
 
-    private func applyAcceptedCommand(_ command: SlideCommand, source: String) {
+    private func applyAcceptedCommand(_ command: SlideCommand, source: String) async {
         guard let deck else {
             statusLine = "Accepted command ignored: no deck"
             appendLog("[APPLIED][\(source)] ignored accepted \(command.action.rawValue): no deck loaded")
+            appendActivity("Accepted action ignored", detail: "No deck loaded", level: .warning)
             return
         }
 
@@ -434,56 +638,66 @@ final class AppViewModel: ObservableObject {
             if nextIndex == previousIndex {
                 statusLine = "Accepted next (already at last slide)"
                 appendLog("[APPLIED][\(source)] next ignored: already at last slide \(previousIndex)")
+                appendActivity("AI requested next", detail: "Already on last slide")
                 return
             }
 
             currentSlideIndex = nextIndex
             statusLine = "Accepted next: slide \(nextIndex)"
             appendLog("[APPLIED][\(source)] moved to slide \(nextIndex) via next")
+            appendActivity("Moved to slide \(nextIndex)", detail: "AI requested next")
             pushContextUpdate(reason: "model next")
         case .previous:
             let previousSlideIndex = deck.clampedSlideIndex(currentSlideIndex - 1)
             if previousSlideIndex == previousIndex {
                 statusLine = "Accepted previous (already at first slide)"
                 appendLog("[APPLIED][\(source)] previous ignored: already at first slide \(previousIndex)")
+                appendActivity("AI requested previous", detail: "Already on first slide")
                 return
             }
 
             currentSlideIndex = previousSlideIndex
             statusLine = "Accepted previous: slide \(previousSlideIndex)"
             appendLog("[APPLIED][\(source)] moved to slide \(previousSlideIndex) via previous")
+            appendActivity("Moved to slide \(previousSlideIndex)", detail: "AI requested previous")
             pushContextUpdate(reason: "model previous")
         case .goto:
             guard let targetSlide = command.targetSlide else {
                 statusLine = "Accepted goto ignored: missing target"
                 appendLog("[APPLIED][\(source)] goto ignored: accepted command missing target_slide")
+                appendActivity("AI goto ignored", detail: "Missing destination slide", level: .warning)
                 return
             }
             guard deck.slideIndices.contains(targetSlide) else {
                 statusLine = "Accepted goto ignored: invalid target"
                 appendLog("[APPLIED][\(source)] goto ignored: target \(targetSlide) outside loaded deck")
+                appendActivity("AI goto ignored", detail: "Slide \(targetSlide) is not in this deck", level: .warning)
                 return
             }
             if targetSlide == previousIndex {
                 statusLine = "Accepted goto: already on slide \(targetSlide)"
                 appendLog("[APPLIED][\(source)] goto ignored: already on slide \(targetSlide)")
+                appendActivity("AI requested slide \(targetSlide)", detail: "Already on that slide")
                 return
             }
 
             currentSlideIndex = targetSlide
             statusLine = "Accepted goto: slide \(targetSlide)"
             appendLog("[APPLIED][\(source)] moved to slide \(targetSlide) via goto")
+            appendActivity("Moved to slide \(targetSlide)", detail: "AI requested goto")
             pushContextUpdate(reason: "model goto")
         case .mark:
             guard let markIndex = command.markIndex else {
                 statusLine = "Accepted mark ignored: missing mark_index"
                 appendLog("[APPLIED][\(source)] mark ignored: accepted command missing mark_index")
+                appendActivity("AI mark ignored", detail: "Missing segment index", level: .warning)
                 return
             }
             let slideIndex = currentSlideIndex
             guard let slide = deck.slide(at: slideIndex) else {
                 statusLine = "Accepted mark ignored: no current slide"
                 appendLog("[APPLIED][\(source)] mark ignored: no current slide loaded")
+                appendActivity("AI mark ignored", detail: "No current slide", level: .warning)
                 return
             }
             let segments = slide.markableSegments()
@@ -491,6 +705,7 @@ final class AppViewModel: ObservableObject {
             guard validIndices.contains(markIndex) else {
                 statusLine = "Accepted mark ignored: invalid index"
                 appendLog("[APPLIED][\(source)] mark ignored: mark_index \(markIndex) outside current slide segments")
+                appendActivity("AI mark ignored", detail: "Segment \(markIndex) is not on this slide", level: .warning)
                 return
             }
 
@@ -500,8 +715,10 @@ final class AppViewModel: ObservableObject {
             statusLine = "Marked segment \(markIndex) on slide \(slideIndex)"
             if isNewMark {
                 appendLog("[APPLIED][\(source)] marked segment \(markIndex) on slide \(slideIndex)")
+                appendActivity("Marked covered content", detail: "Slide \(slideIndex), segment \(markIndex)")
             } else {
                 appendLog("[APPLIED][\(source)] segment \(markIndex) already marked on slide \(slideIndex)")
+                appendActivity("Segment already marked", detail: "Slide \(slideIndex), segment \(markIndex)")
             }
 
             let nonTitleIndices = Set(segments.filter { $0.kind != "title" }.map(\.index))
@@ -512,6 +729,19 @@ final class AppViewModel: ObservableObject {
             if allRequiredMarked || markedLastSegment {
                 let nextIndex = deck.clampedSlideIndex(slideIndex + 1)
                 if nextIndex != slideIndex {
+                    let shouldDelayAdvance =
+                        markedLastSegment
+                        && (
+                            (command.highlightPhrases?.isEmpty == false)
+                            || (command.utteranceExcerpt?.isEmpty == false)
+                        )
+                    if shouldDelayAdvance {
+                        try? await Task.sleep(for: .seconds(1))
+                        guard currentSlideIndex == slideIndex else {
+                            appendLog("[AUTO][\(source)] auto-advance canceled: slide changed during highlight hold")
+                            return
+                        }
+                    }
                     currentSlideIndex = nextIndex
                     statusLine = "All segments marked on slide \(slideIndex): auto-advanced to \(nextIndex)"
                     if markedLastSegment && !allRequiredMarked {
@@ -521,6 +751,10 @@ final class AppViewModel: ObservableObject {
                     } else {
                         appendLog("[AUTO][\(source)] all non-title segments marked on slide \(slideIndex); advanced to slide \(nextIndex)")
                     }
+                    appendActivity(
+                        "Auto-advanced to slide \(nextIndex)",
+                        detail: "Slide \(slideIndex) coverage complete"
+                    )
                     pushContextUpdate(reason: "auto advance after full coverage")
                 } else {
                     statusLine = "All segments marked on final slide \(slideIndex)"
@@ -531,11 +765,13 @@ final class AppViewModel: ObservableObject {
                     } else {
                         appendLog("[AUTO][\(source)] all non-title segments marked on final slide \(slideIndex)")
                     }
+                    appendActivity("Slide coverage complete", detail: "Final slide \(slideIndex)")
                 }
             }
         case .stay:
             statusLine = "Accepted stay: no slide change"
             appendLog("[APPLIED][\(source)] stay applied: no slide change (slide \(currentSlideIndex))")
+            appendActivity("AI chose to stay", detail: "No slide change")
         }
     }
 
@@ -1092,7 +1328,66 @@ final class AppViewModel: ObservableObject {
         )
     }
 
-    private func pushContextUpdate(reason: String) {
+    private func activitySummary(for command: SlideCommand) -> String {
+        switch command.action {
+        case .next:
+            return "Move to the next slide"
+        case .previous:
+            return "Move to the previous slide"
+        case .goto:
+            if let targetSlide = command.targetSlide {
+                return "Jump to slide \(targetSlide)"
+            }
+            return "Jump to a specific slide"
+        case .mark:
+            if let markIndex = command.markIndex {
+                return "Mark segment \(markIndex) as covered"
+            }
+            return "Mark a covered segment"
+        case .stay:
+            return "Stay on the current slide"
+        }
+    }
+
+    private func friendlyDecisionReason(_ reason: String) -> String {
+        let lowercased = reason.lowercased()
+        if lowercased.contains("confidence") {
+            return "Low confidence"
+        }
+        if lowercased.contains("cooldown") {
+            return "Cooldown is active"
+        }
+        if lowercased.contains("dwell") {
+            return "Waiting for stronger confirmation"
+        }
+        if lowercased.contains("invalid") {
+            return "Command did not match the current deck state"
+        }
+        if lowercased.contains("model requested stay") {
+            return "Model requested no slide change"
+        }
+        return reason
+    }
+
+    private func appendActivity(
+        _ title: String,
+        detail: String? = nil,
+        level: ActivityFeedLevel = .info
+    ) {
+        let entry = ActivityFeedEntry(
+            timestamp: Date(),
+            title: title,
+            detail: detail,
+            level: level
+        )
+        activityEntries.append(entry)
+        if activityEntries.count > maxActivityEntries {
+            let overflow = activityEntries.count - maxActivityEntries
+            activityEntries.removeFirst(overflow)
+        }
+    }
+
+    private func pushContextUpdate(reason: String, shouldLogResult: Bool = true) {
         guard let deck else { return }
         guard isSessionActive else { return }
 
@@ -1100,11 +1395,21 @@ final class AppViewModel: ObservableObject {
         Task {
             do {
                 try await bridge.updateInstructions(instructions)
-                appendLog("Context updated for slide \(currentSlideIndex) (\(reason))")
+                if shouldLogResult {
+                    appendLog("Context updated for slide \(currentSlideIndex) (\(reason))")
+                }
             } catch {
-                appendLog("Context update failed: \(error.localizedDescription)")
+                if shouldLogResult {
+                    appendLog("Context update failed: \(error.localizedDescription)")
+                }
             }
         }
+    }
+
+    private func isCurrentEventArrowKeyNavigation() -> Bool {
+        guard let event = NSApp.currentEvent else { return false }
+        guard event.type == .keyDown else { return false }
+        return event.keyCode == 123 || event.keyCode == 124
     }
 
     private func bootstrapDeckPath() {
@@ -1232,8 +1537,8 @@ final class AppViewModel: ObservableObject {
             }
             try Data().write(to: logFileURL, options: .atomic)
 
-            let sessionHeader = "----- Session started \(Self.fileTimestampFormatter.string(from: Date())) -----"
-            appendRawLineToLogFile(sessionHeader)
+            let runHeader = "----- Run started \(Self.fileTimestampFormatter.string(from: Date())) -----"
+            appendRawLineToLogFile(runHeader)
         } catch {
             reportLogFileErrorOnce("Failed to prepare log file: \(error.localizedDescription)")
         }
@@ -1292,6 +1597,11 @@ final class AppViewModel: ObservableObject {
         currentSlideIndex = loadedDeck.clampedSlideIndex(currentSlideIndex)
         statusLine = "Loaded deck: \(loadedDeck.presentationTitle)"
         appendLog("Loaded deck from \(sourceDescription) with \(loadedDeck.slides.count) slides")
+        appendActivity(
+            "Deck loaded",
+            detail: "\(loadedDeck.presentationTitle) (\(loadedDeck.slides.count) slides)",
+            level: .success
+        )
         pushContextUpdate(reason: "deck load")
     }
 

@@ -47,10 +47,11 @@ open AutoPresenter.xcodeproj
 
 - verify API key and model (`gpt-realtime` default)
 - load your deck JSON (or keep `presentation.sample.json`)
-- click `Start Realtime`
+- click the record control to start the session
 - allow microphone permission when prompted
 - speak through your rehearsal
-- observe command decisions in `Command Log`
+- observe session and AI decisions in the main activity feed
+- adjust safety gate values in `AutoPresenter > Settings...` when needed
 
 ## Deck JSON format
 
