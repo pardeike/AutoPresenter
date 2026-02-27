@@ -1,32 +1,41 @@
-# AutoPresenter Prototype (macOS)
+# AutoPresenter (Prototype)
 
-Prototype macOS app that:
+AutoPresenter is a macOS prototype for AI-assisted presentation rehearsal.
+It listens while you speak, keeps the model grounded on the current slide, and interprets structured Realtime commands for highlighting and navigation.
 
-- loads a JSON presentation deck (`presentation.sample.json` schema)
-- opens a Realtime API session over **WebRTC**
-- streams microphone audio to the model
-- injects current slide context into session instructions
-- receives structured slide commands via function-calling events
-- applies a local safety gate and logs accepted/rejected commands
+The project is intentionally still in prototype mode: no production-grade Keynote/PowerPoint actuation flow yet.
 
-This prototype intentionally **does not** actuate Keynote/PowerPoint yet.
+## What You Get
+
+- Realtime speech session via WebRTC (`gpt-realtime` by default)
+- JSON deck loading with multiple slide layouts
+- Presenter window + main control window
+- In-app slide editor with drag reorder, add/delete, and save
+- Local command safety gate before any command is accepted
+- Activity and command logging (including mirrored runtime log file)
 
 ## Requirements
 
 - macOS 14+
 - Xcode 26+
-- [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 - OpenAI API key with Realtime access
 
-## Run
+Install XcodeGen:
 
-1. Export your API key:
+```bash
+brew install xcodegen
+```
+
+## Quick Start
+
+1. Set API key:
 
 ```bash
 export OPENAI_API_KEY='sk-...'
 ```
 
-Alternatively, place it in `~/.api-keys`:
+or create `~/.api-keys`:
 
 ```json
 {
@@ -34,7 +43,7 @@ Alternatively, place it in `~/.api-keys`:
 }
 ```
 
-2. Generate and open the project:
+2. Generate project and open it:
 
 ```bash
 xcodegen generate
@@ -44,23 +53,17 @@ open AutoPresenter.xcodeproj
 3. Build and run target `AutoPresenter`.
 
 4. In the app:
+- Open a deck (`File > Open…`)
+- Start recording (`File > Start Recording` or `Cmd+R`)
+- Open presentation window (`File > Show Presentation` or `Cmd+P`)
+- Speak through your talk and monitor decisions in the activity feed
 
-- verify API key and model (`gpt-realtime` default)
-- load your deck JSON (or keep `presentation.sample.json`)
-- click the record control to start the session
-- allow microphone permission when prompted
-- speak through your rehearsal
-- observe session and AI decisions in the main activity feed
-- adjust safety gate values in `AutoPresenter > Settings...` when needed
+## Deck JSON Support
 
-## Deck JSON format
+The loader accepts both a simple prototype schema and a richer schema with layouts.
+Unknown/extra fields are tolerated.
 
-The loader supports both:
-
-- prototype schema (`presentation_title`, `slides[index/title/bullets/notes]`)
-- richer schema (`deckTitle`, `slides[layout/title/speakerNotes/... ]`) as used in `/Users/ap/Projects/MeTube/documentation/presentation.json`
-
-### Prototype schema
+### Simple schema
 
 ```json
 {
@@ -70,21 +73,38 @@ The loader supports both:
     {
       "index": 1,
       "title": "Intro",
-      "bullets": ["..."],
-      "notes": "...",
-      "keywords": ["..."]
+      "bullets": ["Point A", "Point B"]
     }
   ]
 }
 ```
 
-## Notes
+### Rich schema (core fields)
 
-- Realtime connection path:
-  - app mints ephemeral `client_secret` via `POST /v1/realtime/client_secrets`
-  - embedded WebRTC client posts SDP to `POST /v1/realtime/calls`
-  - data channel receives events and function call arguments
-- Command schema expected from model tool call:
+```json
+{
+  "deckTitle": ["My Talk"],
+  "slides": [
+    {
+      "layout": "bullets",
+      "title": ["Slide title"],
+      "subtitle": ["Optional subtitle"],
+      "bullets": ["One", "Two"]
+    }
+  ]
+}
+```
+
+Supported layouts:
+- `title`
+- `bullets`
+- `quote`
+- `image`
+- `twoColumn`
+
+## Command Pipeline (Realtime)
+
+Expected model tool payload:
 
 ```json
 {
@@ -102,13 +122,39 @@ The loader supports both:
 }
 ```
 
-- Safety gate checks:
-  - JSON decoding/schema compatibility
-  - confidence threshold
-  - cooldown window
-  - dwell confirmation
-  - `goto` target validity within loaded deck
+Safety gate validates:
+- command shape / compatibility
+- confidence threshold
+- cooldown and dwell windows
+- navigation target validity
 
-## Next step to reach full automation
+## Keyboard Shortcuts
 
-Connect accepted commands to local actuation (AppleScript/key events) and feed back actual slide index from Keynote into `currentSlideIndex` context updates.
+- `Cmd+O` Open deck
+- `Cmd+S` Save
+- `Cmd+Shift+S` Save As…
+- `Cmd+E` Open editor
+- `Cmd+P` Show/Hide presentation window
+- `Cmd+R` Start/Stop recording
+- `Cmd+F` Toggle fullscreen
+- `Cmd+Return` Save slide draft in editor
+
+## Runtime Logs
+
+- Mirrored command log file: `runtime/command-log.txt`
+- File is truncated on app startup, then appended for the current session
+
+## Project Status
+
+Current focus:
+- Realtime command pipeline quality
+- window/editor UX
+- robust in-memory deck editing and persistence
+
+Not in scope yet:
+- full production presenter actuation
+- integrated finalized fullscreen presenter product flow
+
+## License
+
+MIT. See [LICENSE](LICENSE).
