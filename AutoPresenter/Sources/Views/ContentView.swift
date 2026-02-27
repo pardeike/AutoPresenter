@@ -4,6 +4,7 @@ struct ContentView: View {
     @ObservedObject var viewModel: AppViewModel
 
     @State private var showBridgeView = false
+    @State private var presenterWindowManager = PresenterWindowManager()
 
     private let commandLogBottomID = "command-log-bottom"
     private let panelGap: CGFloat = 10
@@ -31,6 +32,9 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(16)
+        }
+        .onDisappear {
+            presenterWindowManager.close()
         }
     }
 
@@ -75,6 +79,11 @@ struct ContentView: View {
                     .font(.system(.headline, design: .monospaced))
 
                 Spacer()
+
+                Button("Present") {
+                    presenterWindowManager.show(viewModel: viewModel)
+                }
+                .disabled(viewModel.deck == nil)
 
                 Button("Next") {
                     viewModel.nextSlide()

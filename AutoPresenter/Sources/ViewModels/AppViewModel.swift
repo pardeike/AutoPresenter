@@ -24,6 +24,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var isStarting = false
     @Published private(set) var connectionState = "idle"
     @Published private(set) var statusLine = "Ready"
+    @Published private(set) var isSpeechDetected = false
     @Published private(set) var highlightedPhrasesBySlide: [Int: [String]] = [:]
     @Published private(set) var markedSegmentIndicesBySlide: [Int: Set<Int>] = [:]
 
@@ -192,6 +193,7 @@ final class AppViewModel: ObservableObject {
         }
 
         isStarting = true
+        isSpeechDetected = false
         defer { isStarting = false }
         beginRealtimeActivityIfNeeded()
 
@@ -217,11 +219,22 @@ final class AppViewModel: ObservableObject {
             appendLog("Stop session JS error: \(error.localizedDescription)")
         }
         isSessionActive = false
+        isSpeechDetected = false
         connectionState = "stopped"
         statusLine = "Session stopped"
         await safetyGate.reset()
         endRealtimeActivityIfNeeded()
         appendLog("Realtime session stopped")
+    }
+
+    func toggleRealtimeSessionFromPresenter() {
+        Task {
+            if isSessionActive {
+                await stopSession()
+            } else {
+                await startSession()
+            }
+        }
     }
 
     private func handleBridgePayload(_ payload: [String: Any]) {
@@ -245,11 +258,13 @@ final class AppViewModel: ObservableObject {
             if state == "connected" {
                 statusLine = "Realtime connected"
                 isSessionActive = true
+                isSpeechDetected = false
                 beginRealtimeActivityIfNeeded()
             }
             if state == "closed" || state == "failed" {
                 statusLine = "Realtime disconnected"
                 isSessionActive = false
+                isSpeechDetected = false
                 endRealtimeActivityIfNeeded()
             }
         case "event":
@@ -287,8 +302,10 @@ final class AppViewModel: ObservableObject {
             appendLog("Realtime error event: \(pretty)")
         case "input_audio_buffer.speech_started":
             appendLog("Speech detected")
+            isSpeechDetected = true
         case "input_audio_buffer.speech_stopped":
             appendLog("Speech ended")
+            isSpeechDetected = false
         default:
             break
         }
