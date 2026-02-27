@@ -94,9 +94,6 @@ struct PresentationDeck: Sendable {
                 }.joined(separator: "\n")
                 parts.append("Current slide markable segments:\n\(segmentLines)")
             }
-            if !current.speakerNotes.isEmpty {
-                parts.append("Speaker notes: \(current.speakerNotes)")
-            }
         }
 
         if let previous {
@@ -137,7 +134,6 @@ struct SlideSegmentBuckets: Sendable {
     let subtitle: [SlideMarkSegment]
     let bodyBullets: [SlideMarkSegment]
     let quote: [SlideMarkSegment]
-    let attribution: [SlideMarkSegment]
     let imagePlaceholder: [SlideMarkSegment]
     let caption: [SlideMarkSegment]
     let leftTitle: [SlideMarkSegment]
@@ -150,7 +146,6 @@ struct SlideSegmentBuckets: Sendable {
             + subtitle
             + bodyBullets
             + quote
-            + attribution
             + imagePlaceholder
             + caption
             + leftTitle
@@ -168,13 +163,8 @@ struct PresentationSlide: Identifiable, Sendable {
     let subtitle: String
     let subtitleParagraphs: [String]
     let bullets: [String]
-    let speakerNotes: String
-    let speakerNoteParagraphs: [String]
-    let keywords: [String]
     let quote: String?
     let quoteParagraphs: [String]
-    let attribution: String?
-    let attributionParagraphs: [String]
     let imagePlaceholder: String?
     let imagePlaceholderParagraphs: [String]
     let caption: String?
@@ -185,19 +175,25 @@ struct PresentationSlide: Identifiable, Sendable {
     var id: Int { index }
 
     var promptSummary: String {
-        let titlePart = title.isEmpty ? "(untitled)" : title
+        let titlePart = title.trimmingCharacters(in: .whitespacesAndNewlines)
         switch layout {
         case .quote:
             let quotePart = quote ?? ""
+            if titlePart.isEmpty {
+                return "[quote] \(quotePart)"
+            }
             return "\(titlePart) [quote] \(quotePart)"
         case .twoColumn:
-            return "\(titlePart) [two-column]"
+            return titlePart.isEmpty ? "[two-column]" : "\(titlePart) [two-column]"
         case .image:
-            return "\(titlePart) [image]"
+            return titlePart.isEmpty ? "[image]" : "\(titlePart) [image]"
         case .title:
+            if titlePart.isEmpty {
+                return subtitle.isEmpty ? "[title]" : subtitle
+            }
             return subtitle.isEmpty ? titlePart : "\(titlePart) — \(subtitle)"
         case .bullets, .unknown:
-            return "\(titlePart) [\(bullets.count) bullets]"
+            return titlePart.isEmpty ? "[\(bullets.count) bullets]" : "\(titlePart) [\(bullets.count) bullets]"
         }
     }
 
@@ -250,11 +246,12 @@ struct PresentationSlide: Identifiable, Sendable {
         }
 
         let titleSegments = makeSegments(kind: "title", from: titleParagraphs)
-        let subtitleSegments = makeSegments(kind: "subtitle", from: subtitleParagraphs)
+        let subtitleSegments = layout == .image
+            ? []
+            : makeSegments(kind: "subtitle", from: subtitleParagraphs)
 
         var bodyBulletSegments: [SlideMarkSegment] = []
         var quoteSegments: [SlideMarkSegment] = []
-        var attributionSegments: [SlideMarkSegment] = []
         var imageSegments: [SlideMarkSegment] = []
         var captionSegments: [SlideMarkSegment] = []
         var leftTitleSegments: [SlideMarkSegment] = []
@@ -267,7 +264,6 @@ struct PresentationSlide: Identifiable, Sendable {
             bodyBulletSegments = makeSegments(kind: "bullet", from: bullets)
         case .quote:
             quoteSegments = makeSegments(kind: "quote", from: quoteParagraphs)
-            attributionSegments = makeSegments(kind: "attribution", from: attributionParagraphs)
         case .image:
             imageSegments = makeSegments(kind: "image", from: imagePlaceholderParagraphs)
             captionSegments = makeSegments(kind: "caption", from: captionParagraphs)
@@ -283,7 +279,6 @@ struct PresentationSlide: Identifiable, Sendable {
         case .unknown:
             bodyBulletSegments = makeSegments(kind: "bullet", from: bullets)
             quoteSegments = makeSegments(kind: "quote", from: quoteParagraphs)
-            attributionSegments = makeSegments(kind: "attribution", from: attributionParagraphs)
             imageSegments = makeSegments(kind: "image", from: imagePlaceholderParagraphs)
             captionSegments = makeSegments(kind: "caption", from: captionParagraphs)
             if let leftColumn {
@@ -301,13 +296,32 @@ struct PresentationSlide: Identifiable, Sendable {
             subtitle: subtitleSegments,
             bodyBullets: bodyBulletSegments,
             quote: quoteSegments,
-            attribution: attributionSegments,
             imagePlaceholder: imageSegments,
             caption: captionSegments,
             leftTitle: leftTitleSegments,
             leftBullets: leftBulletSegments,
             rightTitle: rightTitleSegments,
             rightBullets: rightBulletSegments
+        )
+    }
+
+    func withIndex(_ index: Int) -> PresentationSlide {
+        PresentationSlide(
+            index: index,
+            layout: layout,
+            title: title,
+            titleParagraphs: titleParagraphs,
+            subtitle: subtitle,
+            subtitleParagraphs: subtitleParagraphs,
+            bullets: bullets,
+            quote: quote,
+            quoteParagraphs: quoteParagraphs,
+            imagePlaceholder: imagePlaceholder,
+            imagePlaceholderParagraphs: imagePlaceholderParagraphs,
+            caption: caption,
+            captionParagraphs: captionParagraphs,
+            leftColumn: leftColumn,
+            rightColumn: rightColumn
         )
     }
 }
@@ -362,6 +376,80 @@ enum PresentationDeckLoader {
     }
 }
 
+enum PresentationDeckWriter {
+    static func encode(deck: PresentationDeck) throws -> Data {
+        let payload = WritableDeckFile(deck: deck)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        return try encoder.encode(payload)
+    }
+}
+
+private struct WritableDeckFile: Encodable {
+    let deckTitle: [String]
+    let subtitle: [String]?
+    let author: [String]?
+    let language: String?
+    let slides: [WritableSlideFile]
+
+    init(deck: PresentationDeck) {
+        deckTitle = ParagraphValue.splitParagraphs(deck.presentationTitle)
+        subtitle = deck.subtitle.flatMap { ParagraphValue.splitParagraphs($0).nilIfEmpty }
+        author = deck.author.flatMap { ParagraphValue.splitParagraphs($0).nilIfEmpty }
+        language = deck.language?.nilIfBlank
+        slides = deck.slides
+            .sorted { $0.index < $1.index }
+            .map(WritableSlideFile.init(slide:))
+    }
+}
+
+private struct WritableSlideFile: Encodable {
+    let layout: String
+    let title: [String]
+    let subtitle: [String]?
+    let bullets: [String]?
+    let quote: [String]?
+    let imagePlaceholder: [String]?
+    let caption: [String]?
+    let left: WritableSlideColumnFile?
+    let right: WritableSlideColumnFile?
+
+    init(slide: PresentationSlide) {
+        layout = slide.layout.rawValue
+        title = slide.titleParagraphs.cleanedParagraphs()
+        subtitle = slide.subtitleParagraphs.cleanedParagraphs().nilIfEmpty
+        quote = slide.quoteParagraphs.cleanedParagraphs().nilIfEmpty
+        imagePlaceholder = slide.imagePlaceholderParagraphs.cleanedParagraphs().nilIfEmpty
+        caption = slide.captionParagraphs.cleanedParagraphs().nilIfEmpty
+        left = slide.leftColumn.map(WritableSlideColumnFile.init(column:))
+        right = slide.rightColumn.map(WritableSlideColumnFile.init(column:))
+
+        switch slide.layout {
+        case .twoColumn:
+            bullets = nil
+        case .title:
+            bullets = nil
+        case .quote:
+            bullets = nil
+        case .image:
+            bullets = nil
+        case .bullets, .unknown:
+            bullets = slide.bullets.cleanedParagraphs().nilIfEmpty
+        }
+    }
+}
+
+private struct WritableSlideColumnFile: Encodable {
+    let title: [String]
+    let bullets: [String]?
+
+    init(column: SlideColumn) {
+        title = column.titleParagraphs.cleanedParagraphs()
+        bullets = column.bullets.cleanedParagraphs().nilIfEmpty
+    }
+}
+
 private struct SimpleDeckFile: Decodable {
     let presentationTitle: String
     let language: String?
@@ -392,15 +480,11 @@ private struct SimpleSlideFile: Decodable {
     let index: Int
     let title: String
     let bullets: [String]?
-    let notes: String?
-    let keywords: [String]?
 
     func toSlide() -> PresentationSlide {
-        let titleParagraphs = [title].cleanedParagraphs()
-        let finalTitleParagraphs = titleParagraphs.isEmpty ? ["Slide \(index)"] : titleParagraphs
+        let finalTitleParagraphs = [title].cleanedParagraphs()
         let subtitleParagraphs: [String] = []
         let bulletItems = (bullets ?? []).cleanedParagraphs()
-        let noteParagraphs = ParagraphValue.splitParagraphs(notes ?? "")
 
         return PresentationSlide(
             index: index,
@@ -410,13 +494,8 @@ private struct SimpleSlideFile: Decodable {
             subtitle: "",
             subtitleParagraphs: subtitleParagraphs,
             bullets: bulletItems,
-            speakerNotes: noteParagraphs.joined(separator: "\n"),
-            speakerNoteParagraphs: noteParagraphs,
-            keywords: keywords ?? [],
             quote: nil,
             quoteParagraphs: [],
-            attribution: nil,
-            attributionParagraphs: [],
             imagePlaceholder: nil,
             imagePlaceholderParagraphs: [],
             caption: nil,
@@ -431,6 +510,7 @@ private struct RichDeckFile: Decodable {
     let deckTitle: ParagraphValue?
     let subtitle: ParagraphValue?
     let author: ParagraphValue?
+    let language: String?
     let slides: [RichSlideFile]
 
     func toDeck() -> PresentationDeck {
@@ -446,7 +526,7 @@ private struct RichDeckFile: Decodable {
             presentationTitle: title,
             subtitle: subtitleValue,
             author: authorValue,
-            language: nil,
+            language: language?.nilIfBlank,
             slides: mappedSlides
         )
     }
@@ -457,9 +537,7 @@ private struct RichSlideFile: Decodable {
     let title: ParagraphValue?
     let subtitle: ParagraphValue?
     let bullets: [String]?
-    let speakerNotes: ParagraphValue?
     let quote: ParagraphValue?
-    let attribution: ParagraphValue?
     let imagePlaceholder: ParagraphValue?
     let caption: ParagraphValue?
     let left: RichSlideColumnFile?
@@ -470,25 +548,31 @@ private struct RichSlideFile: Decodable {
         let leftColumn = left?.toColumn()
         let rightColumn = right?.toColumn()
 
-        let rawTitleParagraphs = (title?.paragraphs ?? []).cleanedParagraphs()
-        let finalTitleParagraphs = rawTitleParagraphs.isEmpty ? ["Slide \(index)"] : rawTitleParagraphs
+        let finalTitleParagraphs = (title?.paragraphs ?? []).cleanedParagraphs()
         let finalTitle = finalTitleParagraphs.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
 
         let subtitleParagraphs = (subtitle?.paragraphs ?? []).cleanedParagraphs()
+        let resolvedSubtitleParagraphs = resolvedLayout == .image ? [] : subtitleParagraphs
         let bulletItems = (bullets ?? []).cleanedParagraphs()
-        let noteParagraphs = (speakerNotes?.paragraphs ?? []).cleanedParagraphs()
         let quoteParagraphs = (quote?.paragraphs ?? []).cleanedParagraphs()
-        let attributionParagraphs = (attribution?.paragraphs ?? []).cleanedParagraphs()
         let imageParagraphs = (imagePlaceholder?.paragraphs ?? []).cleanedParagraphs()
         let captionParagraphs = (caption?.paragraphs ?? []).cleanedParagraphs()
 
         var mergedBullets = bulletItems
         if resolvedLayout == .twoColumn {
             if let leftColumn {
-                mergedBullets.append(contentsOf: leftColumn.bullets.map { "\(leftColumn.title): \($0)" })
+                let leftPrefix = leftColumn.title.nilIfBlank
+                mergedBullets.append(contentsOf: leftColumn.bullets.map { bullet in
+                    guard let leftPrefix else { return bullet }
+                    return "\(leftPrefix): \(bullet)"
+                })
             }
             if let rightColumn {
-                mergedBullets.append(contentsOf: rightColumn.bullets.map { "\(rightColumn.title): \($0)" })
+                let rightPrefix = rightColumn.title.nilIfBlank
+                mergedBullets.append(contentsOf: rightColumn.bullets.map { bullet in
+                    guard let rightPrefix else { return bullet }
+                    return "\(rightPrefix): \(bullet)"
+                })
             }
         }
 
@@ -497,16 +581,11 @@ private struct RichSlideFile: Decodable {
             layout: resolvedLayout,
             title: finalTitle,
             titleParagraphs: finalTitleParagraphs,
-            subtitle: subtitleParagraphs.joined(separator: " "),
-            subtitleParagraphs: subtitleParagraphs,
+            subtitle: resolvedSubtitleParagraphs.joined(separator: " "),
+            subtitleParagraphs: resolvedSubtitleParagraphs,
             bullets: mergedBullets,
-            speakerNotes: noteParagraphs.joined(separator: "\n"),
-            speakerNoteParagraphs: noteParagraphs,
-            keywords: Self.deriveKeywords(from: finalTitle, bullets: mergedBullets),
             quote: quoteParagraphs.joined(separator: " ").nilIfBlank,
             quoteParagraphs: quoteParagraphs,
-            attribution: attributionParagraphs.joined(separator: " ").nilIfBlank,
-            attributionParagraphs: attributionParagraphs,
             imagePlaceholder: imageParagraphs.joined(separator: " ").nilIfBlank,
             imagePlaceholderParagraphs: imageParagraphs,
             caption: captionParagraphs.joined(separator: " ").nilIfBlank,
@@ -515,16 +594,6 @@ private struct RichSlideFile: Decodable {
             rightColumn: rightColumn
         )
     }
-
-    private static func deriveKeywords(from title: String, bullets: [String]) -> [String] {
-        let source = ([title] + bullets.prefix(2)).joined(separator: " ")
-        let separators = CharacterSet.alphanumerics.inverted
-        let tokens = source
-            .lowercased()
-            .components(separatedBy: separators)
-            .filter { $0.count >= 4 }
-        return Array(Set(tokens)).sorted().prefix(8).map { String($0) }
-    }
 }
 
 private struct RichSlideColumnFile: Decodable {
@@ -532,8 +601,7 @@ private struct RichSlideColumnFile: Decodable {
     let bullets: [String]?
 
     func toColumn() -> SlideColumn {
-        let titleParagraphs = (title?.paragraphs ?? []).cleanedParagraphs()
-        let finalTitleParagraphs = titleParagraphs.isEmpty ? ["Column"] : titleParagraphs
+        let finalTitleParagraphs = (title?.paragraphs ?? []).cleanedParagraphs()
         return SlideColumn(
             title: finalTitleParagraphs.joined(separator: " "),
             titleParagraphs: finalTitleParagraphs,
@@ -582,6 +650,10 @@ private extension Array where Element == String {
     func cleanedParagraphs() -> [String] {
         map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    var nilIfEmpty: [String]? {
+        isEmpty ? nil : self
     }
 }
 

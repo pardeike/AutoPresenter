@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 import Combine
 import Foundation
+import UniformTypeIdentifiers
 import WebKit
 
 enum AppBuildFlags {
@@ -78,6 +79,7 @@ final class AppViewModel: ObservableObject {
 
     @Published private(set) var deck: PresentationDeck?
     @Published private(set) var loadedDeckURL: URL?
+    @Published private(set) var hasUnsavedDeckChanges = false
     @Published private(set) var isSessionActive = false
     @Published private(set) var isStarting = false
     @Published private(set) var isStopping = false
@@ -232,6 +234,140 @@ final class AppViewModel: ObservableObject {
             statusLine = "Failed to load deck"
             appendLog("Deck load failed: \(error.localizedDescription)")
         }
+    }
+
+    func saveDeckToCurrentLocation() {
+        guard deck != nil else {
+            appendActivity("Save skipped", detail: "No deck loaded", level: .warning)
+            appendLog("Save skipped: no deck loaded")
+            return
+        }
+        if let loadedDeckURL {
+            persistDeck(to: loadedDeckURL, updateLoadedURL: false)
+        } else {
+            saveDeckAs()
+        }
+    }
+
+    func saveDeckAs() {
+        guard deck != nil else {
+            appendActivity("Save As skipped", detail: "No deck loaded", level: .warning)
+            appendLog("Save As skipped: no deck loaded")
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.allowedContentTypes = [.json]
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = suggestedDeckFileName()
+
+        if let existingDeckURL = currentDeckFileURLForSavePanel() {
+            let directoryURL: URL
+            if existingDeckURL.hasDirectoryPath {
+                directoryURL = existingDeckURL
+            } else {
+                directoryURL = existingDeckURL.deletingLastPathComponent()
+                let existingFileName = existingDeckURL.lastPathComponent
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !existingFileName.isEmpty {
+                    panel.nameFieldStringValue = existingFileName
+                }
+            }
+
+            if FileManager.default.fileExists(atPath: directoryURL.path) {
+                panel.directoryURL = directoryURL
+            }
+        }
+
+        guard panel.runModal() == .OK, let saveURL = panel.url else {
+            appendLog("Save As cancelled")
+            return
+        }
+        persistDeck(to: saveURL, updateLoadedURL: true)
+    }
+
+    var editableSlides: [PresentationSlide] {
+        guard let deck else {
+            return []
+        }
+        return deck.slides.sorted { $0.index < $1.index }
+    }
+
+    @discardableResult
+    func insertNewSlide(afterSlideIndex selectedSlideIndex: Int?) -> Int? {
+        guard let deck else {
+            return nil
+        }
+        var slides = deck.slides.sorted { $0.index < $1.index }
+        let insertionOffset: Int
+        if let selectedSlideIndex,
+           let selectedOffset = slides.firstIndex(where: { $0.index == selectedSlideIndex }) {
+            insertionOffset = selectedOffset + 1
+        } else {
+            insertionOffset = slides.count
+        }
+
+        slides.insert(Self.makeDefaultSlide(index: insertionOffset + 1), at: insertionOffset)
+        let reindexed = Self.reindexedSlides(slides)
+        applyEditedSlides(
+            reindexed,
+            reason: "slide inserted at position \(insertionOffset + 1)"
+        )
+
+        let newSelectionIndex = min(max(1, insertionOffset + 1), reindexed.count)
+        currentSlideIndex = newSelectionIndex
+        return newSelectionIndex
+    }
+
+    @discardableResult
+    func deleteSlides(withIndices indices: Set<Int>) -> Int? {
+        guard let deck, !indices.isEmpty else {
+            return nil
+        }
+
+        var slides = deck.slides.sorted { $0.index < $1.index }
+        slides.removeAll { indices.contains($0.index) }
+
+        if slides.isEmpty {
+            slides = [Self.makeDefaultSlide(index: 1)]
+        }
+
+        let reindexed = Self.reindexedSlides(slides)
+        applyEditedSlides(reindexed, reason: "deleted \(indices.count) slide(s)")
+
+        let preferredIndex = indices.min() ?? 1
+        let nextSelection = min(max(1, preferredIndex), reindexed.count)
+        currentSlideIndex = nextSelection
+        return nextSelection
+    }
+
+    func moveSlides(fromOffsets: IndexSet, toOffset: Int) -> [Int] {
+        guard let deck else {
+            return []
+        }
+        var slides = deck.slides.sorted { $0.index < $1.index }
+        Self.moveElements(in: &slides, fromOffsets: fromOffsets, toOffset: toOffset)
+        let reorderedOldIndices = slides.map(\.index)
+        let reindexed = Self.reindexedSlides(slides)
+        applyEditedSlides(reindexed, reason: "reordered slides")
+        currentSlideIndex = deck.clampedSlideIndex(currentSlideIndex)
+        return reorderedOldIndices
+    }
+
+    func updateSlide(_ slide: PresentationSlide, atIndex slideIndex: Int) {
+        guard let deck else {
+            return
+        }
+        var slides = deck.slides.sorted { $0.index < $1.index }
+        guard let offset = slides.firstIndex(where: { $0.index == slideIndex }) else {
+            return
+        }
+
+        slides[offset] = slide.withIndex(slideIndex)
+        let reindexed = Self.reindexedSlides(slides)
+        applyEditedSlides(reindexed, reason: "updated slide \(slideIndex)")
+        currentSlideIndex = deck.clampedSlideIndex(currentSlideIndex)
     }
 
     func setLoadedDeckURL(_ url: URL?) {
@@ -1477,10 +1613,6 @@ final class AppViewModel: ObservableObject {
            let index = firstMarkIndex(ofKindContaining: "quote", in: markableSegments) {
             return index
         }
-        if analysisText.contains("attribution"),
-           let index = firstMarkIndex(ofKindContaining: "attribution", in: markableSegments) {
-            return index
-        }
         if analysisText.contains("caption"),
            let index = firstMarkIndex(ofKindContaining: "caption", in: markableSegments) {
             return index
@@ -1856,6 +1988,7 @@ final class AppViewModel: ObservableObject {
         highlightedPhrasesBySlide.removeAll(keepingCapacity: true)
         markedSegmentIndicesBySlide.removeAll(keepingCapacity: true)
         loadedDeckURL = sourceURL
+        hasUnsavedDeckChanges = false
         if let sourceURL {
             deckFilePath = sourceURL.path
             if sourceURL.isFileURL {
@@ -1871,6 +2004,128 @@ final class AppViewModel: ObservableObject {
             level: .success
         )
         pushContextUpdate(reason: "deck load")
+    }
+
+    private func applyEditedSlides(_ slides: [PresentationSlide], reason: String) {
+        guard let deck else {
+            return
+        }
+        let normalizedSlides = Self.reindexedSlides(slides)
+        self.deck = PresentationDeck(
+            presentationTitle: deck.presentationTitle,
+            subtitle: deck.subtitle,
+            author: deck.author,
+            language: deck.language,
+            slides: normalizedSlides
+        )
+        highlightedPhrasesBySlide.removeAll(keepingCapacity: true)
+        markedSegmentIndicesBySlide.removeAll(keepingCapacity: true)
+        currentSlideIndex = min(max(1, currentSlideIndex), max(normalizedSlides.count, 1))
+        hasUnsavedDeckChanges = true
+        appendLog("Deck edited: \(reason)")
+        appendActivity("Deck updated", detail: reason)
+        pushContextUpdate(reason: reason)
+    }
+
+    private func persistDeck(to url: URL, updateLoadedURL: Bool) {
+        guard let deck else {
+            appendLog("Save failed: no deck in memory")
+            return
+        }
+
+        let didStartSecurityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let data = try PresentationDeckWriter.encode(deck: deck)
+            try data.write(to: url, options: .atomic)
+            if updateLoadedURL {
+                loadedDeckURL = url
+                deckFilePath = url.path
+            }
+            if url.isFileURL {
+                persistLastOpenedDeckReference(url)
+            }
+            hasUnsavedDeckChanges = false
+            appendLog("Saved deck to \(url.path)")
+            appendActivity("Deck saved", detail: url.lastPathComponent, level: .success)
+        } catch {
+            appendLog("Save failed: \(error.localizedDescription)")
+            appendActivity("Save failed", detail: error.localizedDescription, level: .error)
+        }
+    }
+
+    private func suggestedDeckFileName() -> String {
+        let title = deck?.presentationTitle.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Presentation"
+        let fallback = "Presentation"
+        let normalizedTitle = title.isEmpty ? fallback : title
+        let sanitized = normalizedTitle
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: "\n", with: " ")
+        return sanitized.hasSuffix(".json") ? sanitized : "\(sanitized).json"
+    }
+
+    private func currentDeckFileURLForSavePanel() -> URL? {
+        if let loadedDeckURL, loadedDeckURL.isFileURL {
+            return loadedDeckURL.standardizedFileURL
+        }
+
+        let trimmedPath = deckFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: trimmedPath).standardizedFileURL
+    }
+
+    private static func reindexedSlides(_ slides: [PresentationSlide]) -> [PresentationSlide] {
+        slides.enumerated().map { offset, slide in
+            slide.withIndex(offset + 1)
+        }
+    }
+
+    private static func makeDefaultSlide(index: Int) -> PresentationSlide {
+        let titleParagraphs = ["New Slide"]
+        return PresentationSlide(
+            index: index,
+            layout: .bullets,
+            title: titleParagraphs.joined(separator: " "),
+            titleParagraphs: titleParagraphs,
+            subtitle: "",
+            subtitleParagraphs: [],
+            bullets: ["Add bullet text"],
+            quote: nil,
+            quoteParagraphs: [],
+            imagePlaceholder: nil,
+            imagePlaceholderParagraphs: [],
+            caption: nil,
+            captionParagraphs: [],
+            leftColumn: nil,
+            rightColumn: nil
+        )
+    }
+
+    private static func moveElements(
+        in slides: inout [PresentationSlide],
+        fromOffsets: IndexSet,
+        toOffset: Int
+    ) {
+        guard !fromOffsets.isEmpty else {
+            return
+        }
+        let movingElements = fromOffsets.map { slides[$0] }
+        for offset in fromOffsets.sorted(by: >) {
+            slides.remove(at: offset)
+        }
+
+        let removedBeforeDestination = fromOffsets.filter { $0 < toOffset }.count
+        let adjustedDestination = toOffset - removedBeforeDestination
+        let destination = min(max(0, adjustedDestination), slides.count)
+        slides.insert(contentsOf: movingElements, at: destination)
     }
 
     private func prettyJSONString(from object: Any) -> String? {
@@ -1898,6 +2153,12 @@ final class AppViewModel: ObservableObject {
     private static let lastOpenedDeckPathDefaultsKey = "lastOpenedDeckPath"
     private static let lastOpenedDeckBookmarkDefaultsKey = "lastOpenedDeckBookmark"
     private static let logFileName = "runtime/command-log.txt"
+
+    static func clearLastOpenedDeckReference() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: lastOpenedDeckPathDefaultsKey)
+        defaults.removeObject(forKey: lastOpenedDeckBookmarkDefaultsKey)
+    }
 
     func debugLog(_ message: String) {
         appendLog(message)

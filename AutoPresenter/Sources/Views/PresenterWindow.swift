@@ -480,13 +480,7 @@ private struct PresenterSlideView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 18) {
-            if segmentBuckets.title.isEmpty {
-                if !AppBuildFlags.strictFullscreenAudienceMode {
-                    Text("Untitled")
-                        .font(.system(size: 68, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                }
-            } else {
+            if !segmentBuckets.title.isEmpty {
                 ForEach(segmentBuckets.title, id: \.index) { segment in
                     segmentText(segment)
                         .font(.system(size: 68, weight: .bold, design: .rounded))
@@ -516,13 +510,6 @@ private struct PresenterSlideView: View {
                     segmentText(segment)
                         .font(.system(size: 56, weight: .semibold, design: .serif).italic())
                         .foregroundStyle(.white)
-                }
-            }
-            if !segmentBuckets.attribution.isEmpty {
-                ForEach(segmentBuckets.attribution, id: \.index) { segment in
-                    segmentText(segment)
-                        .font(.system(size: 30, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.78))
                 }
             }
         case .image:

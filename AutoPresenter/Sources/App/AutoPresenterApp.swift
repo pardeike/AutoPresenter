@@ -31,9 +31,29 @@ struct AutoPresenterApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open…") {
-                    AppCommandRelay.requestOpenDeck()
+                    viewModel.chooseDeckFile()
                 }
                 .keyboardShortcut("o", modifiers: [.command])
+
+                Button("Save") {
+                    viewModel.saveDeckToCurrentLocation()
+                }
+                .keyboardShortcut("s", modifiers: [.command])
+                .disabled(viewModel.deck == nil)
+
+                Button("Save As…") {
+                    viewModel.saveDeckAs()
+                }
+                .keyboardShortcut("S", modifiers: [.command, .shift])
+                .disabled(viewModel.deck == nil)
+
+                Divider()
+
+                Button("Edit…") {
+                    AppCommandRelay.requestOpenEditor()
+                }
+                .keyboardShortcut("e", modifiers: [.command])
+                .disabled(viewModel.deck == nil)
             }
             CommandGroup(after: .newItem) {
                 Divider()
@@ -44,7 +64,7 @@ struct AutoPresenterApp: App {
                 .disabled(viewModel.deck == nil && !commandState.isPresentationVisible)
 
                 Button(viewModel.isRecordingControlActive ? "Stop Recording" : "Start Recording") {
-                    AppCommandRelay.requestToggleRecording()
+                    viewModel.toggleRealtimeSession()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
                 .disabled(!viewModel.canToggleSession || (viewModel.deck == nil && !viewModel.isRecordingControlActive))
@@ -60,12 +80,27 @@ struct AutoPresenterApp: App {
 
 enum AppCommandRelay {
     static let openDeckRequestNotification = Notification.Name("AutoPresenter.OpenDeckRequest")
+    static let saveDeckRequestNotification = Notification.Name("AutoPresenter.SaveDeckRequest")
+    static let saveDeckAsRequestNotification = Notification.Name("AutoPresenter.SaveDeckAsRequest")
+    static let openEditorRequestNotification = Notification.Name("AutoPresenter.OpenEditorRequest")
     static let togglePresentationRequestNotification = Notification.Name("AutoPresenter.TogglePresentationRequest")
     static let toggleRecordingRequestNotification = Notification.Name("AutoPresenter.ToggleRecordingRequest")
     static let presentationVisibilityDidChangeNotification = Notification.Name("AutoPresenter.PresentationVisibilityDidChange")
 
     static func requestOpenDeck() {
         NotificationCenter.default.post(name: openDeckRequestNotification, object: nil)
+    }
+
+    static func requestSaveDeck() {
+        NotificationCenter.default.post(name: saveDeckRequestNotification, object: nil)
+    }
+
+    static func requestSaveDeckAs() {
+        NotificationCenter.default.post(name: saveDeckAsRequestNotification, object: nil)
+    }
+
+    static func requestOpenEditor() {
+        NotificationCenter.default.post(name: openEditorRequestNotification, object: nil)
     }
 
     static func requestTogglePresentation() {
@@ -104,6 +139,7 @@ private final class AppCommandState: ObservableObject {
     }
 }
 
+@MainActor
 private final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, shouldRestoreApplicationState coder: NSCoder) -> Bool {
         false
@@ -117,6 +153,12 @@ private final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         Self.clearSavedApplicationStateIfPresent()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        if NSApp.mainWindow == nil && NSApp.keyWindow == nil {
+            AppViewModel.clearLastOpenedDeckReference()
+        }
+    }
+
     static func clearSavedApplicationStateIfPresent() {
         let savedStateDirectory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library")
@@ -124,6 +166,7 @@ private final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
             .appendingPathComponent("com.ap.autopresenter.savedState", isDirectory: true)
         try? FileManager.default.removeItem(at: savedStateDirectory)
     }
+
 }
 
 private struct MainWindowContent: View {
@@ -136,6 +179,7 @@ private struct MainWindowContent: View {
                 if let activeWindow = NSApp.mainWindow ?? NSApp.keyWindow,
                    shouldManageMainWindow(activeWindow) {
                     MainWindowFramePersistence.shared.attach(window: activeWindow)
+                    updateManagedWindowTitle(activeWindow)
                 }
                 Task { @MainActor in
                     AppMenuPruner.shared.pruneNow()
@@ -158,12 +202,13 @@ private struct MainWindowContent: View {
                     return
                 }
                 MainWindowFramePersistence.shared.attach(window: window)
+                updateManagedWindowTitle(window)
             }
-            .onReceive(NotificationCenter.default.publisher(for: AppCommandRelay.openDeckRequestNotification)) { _ in
-                viewModel.chooseDeckFile()
+            .onChange(of: viewModel.loadedDeckURL?.path) { _, _ in
+                updateCurrentManagedWindowTitle()
             }
-            .onReceive(NotificationCenter.default.publisher(for: AppCommandRelay.toggleRecordingRequestNotification)) { _ in
-                viewModel.toggleRealtimeSession()
+            .onChange(of: viewModel.deckFilePath) { _, _ in
+                updateCurrentManagedWindowTitle()
             }
             .onOpenURL { url in
                 guard url.isFileURL else {
@@ -174,7 +219,49 @@ private struct MainWindowContent: View {
     }
 
     private func shouldManageMainWindow(_ window: NSWindow) -> Bool {
-        !(window.delegate is PresenterWindowManager)
+        if window is NSPanel {
+            return false
+        }
+        if window.delegate is PresenterWindowManager {
+            return false
+        }
+        if window.delegate is PresentationEditorWindowManager {
+            return false
+        }
+        return true
+    }
+
+    private func updateCurrentManagedWindowTitle() {
+        if let window = NSApp.mainWindow, shouldManageMainWindow(window) {
+            updateManagedWindowTitle(window)
+            return
+        }
+        if let window = NSApp.keyWindow, shouldManageMainWindow(window) {
+            updateManagedWindowTitle(window)
+            return
+        }
+        if let window = NSApp.windows.first(where: shouldManageMainWindow) {
+            updateManagedWindowTitle(window)
+        }
+    }
+
+    private func updateManagedWindowTitle(_ window: NSWindow) {
+        window.title = mainWindowTitle
+    }
+
+    private var mainWindowTitle: String {
+        let path = documentPathForTitle()
+        guard !path.isEmpty else {
+            return "AutoPresenter"
+        }
+        return "AutoPresenter  \(path)"
+    }
+
+    private func documentPathForTitle() -> String {
+        if let loadedDeckURL = viewModel.loadedDeckURL, loadedDeckURL.isFileURL {
+            return loadedDeckURL.path
+        }
+        return viewModel.deckFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -313,7 +400,16 @@ private final class MainWindowFramePersistence: ObservableObject {
     }
 
     private func shouldManage(_ window: NSWindow) -> Bool {
-        !(window.delegate is PresenterWindowManager)
+        if window is NSPanel {
+            return false
+        }
+        if window.delegate is PresenterWindowManager {
+            return false
+        }
+        if window.delegate is PresentationEditorWindowManager {
+            return false
+        }
+        return true
     }
 
     private func reapplyRestoredOrigin(_ origin: NSPoint, on window: NSWindow, delay: TimeInterval) {
@@ -462,9 +558,6 @@ private final class AppMenuPruner {
 
     private static let targetTitles: Set<String> = [
         "New",
-        "Save",
-        "Save…",
-        "Save...",
         "Duplicate",
         "Duplicate…",
         "Duplicate...",
@@ -480,10 +573,6 @@ private final class AppMenuPruner {
     private static let targetActionNames: Set<String> = [
         "newDocument:",
         "newDocumentAndDisplay:",
-        "saveDocument:",
-        "saveDocumentAs:",
-        "saveDocumentTo:",
-        "save:",
         "duplicateDocument:",
         "duplicate:",
         "toggleTabBar:",
