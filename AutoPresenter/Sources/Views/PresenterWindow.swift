@@ -37,10 +37,18 @@ protocol PresenterWindowBridge: AnyObject {
 @MainActor
 final class PresenterWindowManager: NSObject, NSWindowDelegate {
     private static let minimumWindowSize = NSSize(width: 640, height: 480)
+    private static let frameDefaultsKey = "AutoPresenter.PresenterWindow.FrameString"
 
     private var window: EscapeClosableWindow?
     private var presenterStateModel: PresenterStateModel?
     private weak var currentBridge: (any PresenterWindowBridge)?
+    private var frameObserverTokens: [NSObjectProtocol] = []
+    private var lastPersistedFrame: NSRect?
+    private var suppressFramePersistence = false
+
+    var isVisible: Bool {
+        window?.isVisible ?? false
+    }
 
     func show(bridge: any PresenterWindowBridge) {
         currentBridge = bridge
@@ -59,6 +67,7 @@ final class PresenterWindowManager: NSObject, NSWindowDelegate {
             configureKeyHandling(for: window, stateModel: stateModel)
             enforceMinimumSize(on: window)
             window.makeKeyAndOrderFront(nil)
+            AppCommandRelay.publishPresentationVisibility(true)
             return
         }
 
@@ -80,8 +89,11 @@ final class PresenterWindowManager: NSObject, NSWindowDelegate {
         presenterWindow.isReleasedWhenClosed = false
         presenterWindow.minSize = minimumWindowSize
         presenterWindow.delegate = self
+        let restoredFrame = restorePersistedFrame(on: presenterWindow)
         enforceMinimumSize(on: presenterWindow)
-        presenterWindow.center()
+        if restoredFrame == nil {
+            presenterWindow.center()
+        }
 
         let hostingController = NSHostingController(
             rootView: PresenterRootView(
@@ -94,8 +106,20 @@ final class PresenterWindowManager: NSObject, NSWindowDelegate {
         presenterWindow.contentViewController = hostingController
         configureKeyHandling(for: presenterWindow, stateModel: stateModel)
         window = presenterWindow
+        suppressFramePersistence = true
+        installFrameObservers(for: presenterWindow)
 
         presenterWindow.makeKeyAndOrderFront(nil)
+        AppCommandRelay.publishPresentationVisibility(true)
+        if let restoredFrame {
+            reapplyRestoredFrame(restoredFrame, on: presenterWindow, delay: 0)
+            reapplyRestoredFrame(restoredFrame, on: presenterWindow, delay: 0.25)
+            reapplyRestoredFrame(restoredFrame, on: presenterWindow, delay: 0.8)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self else { return }
+            self.suppressFramePersistence = false
+        }
     }
 
     private func enforceMinimumSize(on window: NSWindow) {
@@ -110,19 +134,132 @@ final class PresenterWindowManager: NSObject, NSWindowDelegate {
     }
 
     func close() {
-        currentBridge?.handlePresenterAction(.closed)
-        currentBridge = nil
-        presenterStateModel = nil
         guard let window else { return }
+        persistFrame(of: window)
         window.close()
-        self.window = nil
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        persistFrame(of: window)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        persistFrame(of: window)
     }
 
     func windowWillClose(_ notification: Notification) {
+        removeFrameObservers()
         currentBridge?.handlePresenterAction(.closed)
         currentBridge = nil
         presenterStateModel = nil
         window = nil
+        AppCommandRelay.publishPresentationVisibility(false)
+    }
+
+    private func restorePersistedFrame(on window: NSWindow) -> NSRect? {
+        if let lastPersistedFrame, isValidPersistedFrame(lastPersistedFrame) {
+            window.setFrame(lastPersistedFrame, display: true, animate: false)
+            return lastPersistedFrame
+        }
+        guard let frameString = UserDefaults.standard.string(forKey: Self.frameDefaultsKey) else {
+            return nil
+        }
+        let restoredFrame = NSRectFromString(frameString)
+        guard isValidPersistedFrame(restoredFrame) else {
+            return nil
+        }
+        if looksLikeLegacyCorruptedFrame(restoredFrame) {
+            UserDefaults.standard.removeObject(forKey: Self.frameDefaultsKey)
+            return nil
+        }
+        lastPersistedFrame = restoredFrame
+        window.setFrame(restoredFrame, display: true, animate: false)
+        return restoredFrame
+    }
+
+    private func persistFrame(of window: NSWindow) {
+        guard !suppressFramePersistence else {
+            return
+        }
+        let frame = window.frame
+        guard isValidPersistedFrame(frame) else {
+            return
+        }
+        let minimumWindowSize = Self.minimumWindowSize
+        if frame.size.width <= minimumWindowSize.width + 1,
+           frame.size.height <= minimumWindowSize.height + 1,
+           let existing = lastPersistedFrame,
+           existing.size.width > minimumWindowSize.width + 1,
+           existing.size.height > minimumWindowSize.height + 1 {
+            return
+        }
+        lastPersistedFrame = frame
+        UserDefaults.standard.set(NSStringFromRect(frame), forKey: Self.frameDefaultsKey)
+    }
+
+    private func installFrameObservers(for window: NSWindow) {
+        removeFrameObservers()
+        let notificationCenter = NotificationCenter.default
+        let windowObject = window as AnyObject
+
+        let moveToken = notificationCenter.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: windowObject,
+            queue: .main
+        ) { [weak self, weak window] _ in
+            Task { @MainActor in
+                guard let self, let window else { return }
+                self.persistFrame(of: window)
+            }
+        }
+
+        let resizeToken = notificationCenter.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: windowObject,
+            queue: .main
+        ) { [weak self, weak window] _ in
+            Task { @MainActor in
+                guard let self, let window else { return }
+                self.persistFrame(of: window)
+            }
+        }
+
+        frameObserverTokens = [moveToken, resizeToken]
+    }
+
+    private func removeFrameObservers() {
+        guard !frameObserverTokens.isEmpty else {
+            return
+        }
+        let notificationCenter = NotificationCenter.default
+        for token in frameObserverTokens {
+            notificationCenter.removeObserver(token)
+        }
+        frameObserverTokens.removeAll(keepingCapacity: true)
+    }
+
+    private func isValidPersistedFrame(_ frame: NSRect) -> Bool {
+        frame.size.width > 64 && frame.size.height > 64
+    }
+
+    private func looksLikeLegacyCorruptedFrame(_ frame: NSRect) -> Bool {
+        let minimumWindowSize = Self.minimumWindowSize
+        let isMinimumSize =
+            abs(frame.size.width - minimumWindowSize.width) <= 1 &&
+            abs(frame.size.height - minimumWindowSize.height) <= 1
+        let isNearLowerLeftCorner = frame.origin.x <= 8 && frame.origin.y <= 80
+        return isMinimumSize && isNearLowerLeftCorner
+    }
+
+    private func reapplyRestoredFrame(_ frame: NSRect, on window: NSWindow, delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak window] in
+            guard let window else {
+                return
+            }
+            window.setFrame(frame, display: true, animate: false)
+        }
     }
 
     private func configureKeyHandling(for window: EscapeClosableWindow, stateModel: PresenterStateModel) {
@@ -281,10 +418,10 @@ private struct PresenterSessionControl: View {
             ZStack {
                 Circle()
                     .fill(.black.opacity(0.20))
-                    .frame(width: 38, height: 38)
+                    .frame(width: 30, height: 30)
                     .overlay {
                         Circle()
-                            .strokeBorder(ringColor, lineWidth: 2)
+                            .strokeBorder(ringColor, lineWidth: 1.8)
                     }
 
                 if isBusy {
@@ -294,7 +431,7 @@ private struct PresenterSessionControl: View {
                 } else {
                     Circle()
                         .fill(ledColor)
-                        .frame(width: isActive ? 11 : 9, height: isActive ? 11 : 9)
+                        .frame(width: isActive ? 10 : 8, height: isActive ? 10 : 8)
                         .shadow(color: ledColor.opacity(0.45), radius: phase == .speaking ? 8 : 3, x: 0, y: 0)
                 }
             }

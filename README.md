@@ -88,11 +88,17 @@ The loader supports both:
 
 ```json
 {
-  "action": "next | previous | goto | stay",
-  "target_slide": 3,
-  "confidence": 0.84,
-  "rationale": "brief reason",
-  "utterance_excerpt": "optional excerpt"
+  "commands": [
+    {
+      "action": "mark | next | previous | goto | stay",
+      "target_slide": null,
+      "mark_index": 2,
+      "confidence": 0.84,
+      "rationale": "brief factual reason",
+      "utterance_excerpt": "optional excerpt",
+      "highlight_phrases": ["exact phrase from slide"]
+    }
+  ]
 }
 ```
 

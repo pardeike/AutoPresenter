@@ -7,49 +7,64 @@
     localStream: null,
   };
 
+  const commandEntrySchema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      action: {
+        type: "string",
+        enum: ["next", "previous", "goto", "mark", "stay"],
+        description: "Slide control action",
+      },
+      target_slide: {
+        type: ["integer", "null"],
+        description: "Required when action is goto, otherwise null",
+      },
+      mark_index: {
+        type: ["integer", "null"],
+        description: "Required and non-null when action is mark, otherwise null",
+      },
+      confidence: {
+        type: "number",
+        minimum: 0,
+        maximum: 1,
+        description: "Model confidence in the command",
+      },
+      rationale: {
+        type: "string",
+        description: "Short factual explanation for the selected action (4-10 words)",
+      },
+      utterance_excerpt: {
+        type: ["string", "null"],
+        description: "Optional exact excerpt of the triggering utterance (max 10 words)",
+      },
+      highlight_phrases: {
+        type: "array",
+        items: { type: "string" },
+        maxItems: 5,
+        description: "Optional phrases from current slide to highlight based on what was just said; [] when none",
+      },
+    },
+    required: ["action", "target_slide", "mark_index", "confidence", "rationale", "utterance_excerpt", "highlight_phrases"],
+  };
+
   const commandToolSchema = {
     type: "function",
     name: "emit_slide_command",
-    description: "Return one command for slide navigation based on the presenter speech and current slide context.",
+    description: "Return one ordered command batch for slide navigation/highlighting based on presenter speech and current slide context.",
     parameters: {
       type: "object",
       additionalProperties: false,
       properties: {
-        action: {
-          type: "string",
-          enum: ["next", "previous", "goto", "mark", "stay"],
-          description: "Slide control action",
-        },
-        target_slide: {
-          type: ["integer", "null"],
-          description: "Required when action is goto, otherwise null",
-        },
-        mark_index: {
-          type: ["integer", "null"],
-          description: "Required and non-null when action is mark, otherwise null",
-        },
-        confidence: {
-          type: "number",
-          minimum: 0,
-          maximum: 1,
-          description: "Model confidence in the command",
-        },
-        rationale: {
-          type: "string",
-          description: "Short factual explanation for the selected action (4-10 words)",
-        },
-        utterance_excerpt: {
-          type: ["string", "null"],
-          description: "Optional exact excerpt of the triggering utterance (max 10 words)",
-        },
-        highlight_phrases: {
+        commands: {
           type: "array",
-          items: { type: "string" },
-          maxItems: 5,
-          description: "Optional phrases from current slide to highlight based on what was just said; [] when none",
+          minItems: 1,
+          maxItems: 6,
+          items: commandEntrySchema,
+          description: "Ordered atomic commands for this speech turn",
         },
       },
-      required: ["action", "target_slide", "mark_index", "confidence", "rationale", "utterance_excerpt", "highlight_phrases"],
+      required: ["commands"],
     },
   };
 
@@ -116,7 +131,7 @@
           },
         },
       },
-      max_output_tokens: 240,
+      max_output_tokens: 420,
     };
   }
 

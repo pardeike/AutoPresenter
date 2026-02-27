@@ -21,7 +21,7 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>AutoPresenter streams microphone audio to your configured Realtime model during rehearsal.</string>
     <key>NSQuitAlwaysKeepsWindows</key>
-    <true/>
+    <false/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

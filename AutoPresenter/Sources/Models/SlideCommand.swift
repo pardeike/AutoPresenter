@@ -6,6 +6,15 @@ enum SlideAction: String, Codable, CaseIterable, Sendable {
     case goto
     case mark
     case stay
+
+    var isNavigation: Bool {
+        switch self {
+        case .next, .previous, .goto:
+            return true
+        case .mark, .stay:
+            return false
+        }
+    }
 }
 
 struct SlideCommand: Codable, Equatable, Sendable {
@@ -30,4 +39,8 @@ struct SlideCommand: Codable, Equatable, Sendable {
     var signature: String {
         "\(action.rawValue):\(targetSlide ?? -1):\(markIndex ?? -1)"
     }
+}
+
+struct SlideCommandBatch: Codable, Equatable, Sendable {
+    let commands: [SlideCommand]
 }

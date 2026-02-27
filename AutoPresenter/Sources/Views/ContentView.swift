@@ -35,10 +35,21 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(16)
         }
+        .onAppear {
+            AppCommandRelay.publishPresentationVisibility(presenterWindowManager.isVisible)
+        }
         .onDisappear {
             presenterWindowManager.close()
+            AppCommandRelay.publishPresentationVisibility(false)
             Task {
                 await viewModel.stopSession()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AppCommandRelay.togglePresentationRequestNotification)) { _ in
+            if presenterWindowManager.isVisible {
+                presenterWindowManager.close()
+            } else if viewModel.deck != nil {
+                presenterWindowManager.show(bridge: presenterBridge)
             }
         }
     }
@@ -91,14 +102,6 @@ struct ContentView: View {
                 .disabled(!viewModel.canGoNext)
                 .keyboardShortcut(.rightArrow, modifiers: [])
             }
-
-            HStack(spacing: 8) {
-                Button("Push Context Update") {
-                    viewModel.applyContextUpdate()
-                }
-                .disabled(!viewModel.isSessionActive)
-                Spacer()
-            }
         }
     }
 
@@ -128,29 +131,23 @@ struct ContentView: View {
 
     private var sessionControlRow: some View {
         HStack(spacing: 12) {
-            Button {
+            Button(role: .destructive) {
                 viewModel.toggleRealtimeSession()
             } label: {
-                RecordingToggleGlyph(
-                    isActive: viewModel.isRecordingControlActive,
-                    isBusy: viewModel.isSessionTransitioning
-                )
+                Text(viewModel.isMicrophoneHot ? "Stop" : "Record")
             }
-            .buttonStyle(.plain)
-            .disabled(!viewModel.canToggleSession)
-            .help(viewModel.isRecordingControlActive ? "Stop session" : "Start session")
+            .buttonStyle(.borderedProminent)
+            .tint(viewModel.isMicrophoneHot ? .green : .red)
+            .disabled(!viewModel.canToggleSession || viewModel.isSessionTransitioning)
+            .help(viewModel.isMicrophoneHot ? "Stop session" : "Start session")
 
-            Button {
+            Button("Present") {
                 presenterWindowManager.show(bridge: presenterBridge)
-            } label: {
-                PresentModeGlyph(isEnabled: viewModel.deck != nil)
             }
-            .buttonStyle(.plain)
             .disabled(viewModel.deck == nil)
             .help("Open Present mode")
-
-            Spacer(minLength: 8)
         }
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     @ViewBuilder
@@ -291,56 +288,6 @@ struct ContentView: View {
             return Color(red: 0.89, green: 0.58, blue: 0.17)
         case .error:
             return Color(red: 0.86, green: 0.26, blue: 0.24)
-        }
-    }
-}
-
-private struct RecordingToggleGlyph: View {
-    let isActive: Bool
-    let isBusy: Bool
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .strokeBorder(.white.opacity(0.78), lineWidth: 3)
-                .background(
-                    Circle()
-                        .fill(.black.opacity(0.10))
-                )
-                .frame(width: 34, height: 34)
-
-            if isBusy {
-                ProgressView()
-                    .controlSize(.small)
-            } else if isActive {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color(red: 0.98, green: 0.24, blue: 0.24))
-                    .frame(width: 11, height: 11)
-            } else {
-                Circle()
-                    .fill(Color(red: 0.95, green: 0.28, blue: 0.28))
-                    .frame(width: 16, height: 16)
-            }
-        }
-    }
-}
-
-private struct PresentModeGlyph: View {
-    let isEnabled: Bool
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .strokeBorder(.white.opacity(0.65), lineWidth: 2)
-                .background(
-                    Circle()
-                        .fill(.black.opacity(0.08))
-                )
-                .frame(width: 34, height: 34)
-
-            Image(systemName: "play.rectangle.fill")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(isEnabled ? .white : .secondary)
         }
     }
 }

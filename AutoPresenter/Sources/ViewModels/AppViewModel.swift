@@ -96,10 +96,12 @@ final class AppViewModel: ObservableObject {
     private let webViewHost = RealtimeWebViewHostWindow()
     private let maxLogEntries = 600
     private let maxActivityEntries = 300
+    private let maxCommandsPerTurn = 6
     private let logFileURL = AppViewModel.resolveLogFileURL()
     @Published private var logEntries: [String] = []
     @Published private var activityEntries: [ActivityFeedEntry] = []
     private var realtimeActivityToken: NSObjectProtocol?
+    private var commandProcessingTask: Task<Void, Never>?
     private var didReportLogFileError = false
 
     private let jsonDecoder: JSONDecoder = {
@@ -172,6 +174,15 @@ final class AppViewModel: ObservableObject {
         isStopping || sessionPhase == .starting || sessionPhase == .connecting
     }
 
+    var isMicrophoneHot: Bool {
+        switch sessionPhase {
+        case .listening, .speaking, .processing:
+            return true
+        case .idle, .starting, .connecting, .stopped, .error:
+            return false
+        }
+    }
+
     var currentSlideHighlightPhrases: [String] {
         highlightedPhrasesBySlide[currentSlideIndex] ?? []
     }
@@ -188,8 +199,7 @@ final class AppViewModel: ObservableObject {
         panel.allowedContentTypes = [.json]
 
         if panel.runModal() == .OK, let url = panel.url {
-            deckFilePath = url.path
-            loadDeckFromPath()
+            loadDeckFromURL(url)
         }
     }
 
@@ -200,11 +210,13 @@ final class AppViewModel: ObservableObject {
             appendLog("Deck load skipped: empty path")
             return
         }
+        loadDeckFromURL(URL(fileURLWithPath: trimmedPath))
+    }
 
+    func loadDeckFromURL(_ url: URL) {
         do {
-            let url = URL(fileURLWithPath: trimmedPath)
             let loadedDeck = try PresentationDeckLoader.load(from: url)
-            applyLoadedDeck(loadedDeck, sourceURL: url, sourceDescription: trimmedPath)
+            applyLoadedDeck(loadedDeck, sourceURL: url, sourceDescription: url.path)
         } catch {
             statusLine = "Failed to load deck"
             appendLog("Deck load failed: \(error.localizedDescription)")
@@ -358,6 +370,8 @@ final class AppViewModel: ObservableObject {
         connectionState = "stopped"
         sessionPhase = .stopped
         statusLine = "Stream stopped"
+        commandProcessingTask?.cancel()
+        commandProcessingTask = nil
         await safetyGate.reset()
         endRealtimeActivityIfNeeded()
         appendLog("Realtime stream stopped")
@@ -499,72 +513,268 @@ final class AppViewModel: ObservableObject {
     }
 
     private func handleCommand(argumentsJSON: String, source: String) {
-        guard let jsonData = argumentsJSON.data(using: .utf8) else {
-            appendLog("Command decode failed: invalid UTF-8")
+        guard let payload = parseCommandPayload(argumentsJSON: argumentsJSON, source: source) else {
             return
         }
 
-        do {
-            let command = try jsonDecoder.decode(SlideCommand.self, from: jsonData)
-            Task {
-                await evaluateCommand(command, source: source)
-            }
-            return
-        } catch {
-            if let recovered = recoverCommandFromPossiblyTruncatedJSON(argumentsJSON) {
-                appendLog("Command decode recovered from truncated payload")
-                Task {
-                    await evaluateCommand(recovered, source: source)
-                }
-                return
-            }
+        for note in payload.normalizationNotes {
+            appendLog("[NORMALIZED][\(source)] \(note)")
+        }
 
-            appendLog("Command decode failed: \(error.localizedDescription)")
-            appendLog("Raw command payload: \(argumentsJSON)")
+        if payload.recoveredFromTruncation {
+            appendLog("[PARSE][\(source)] command decode recovered from truncated payload")
+        }
+        if payload.format == .legacySingle {
+            appendLog("[PARSE][\(source)] accepted legacy single-command payload")
+        }
+        if payload.commands.count > 1 {
+            appendLog("[TURN][\(source)] executing \(payload.commands.count) commands")
+        }
+
+        let priorTask = commandProcessingTask
+        commandProcessingTask = Task { @MainActor in
+            await priorTask?.value
+            for (offset, command) in payload.commands.enumerated() {
+                guard !Task.isCancelled else { return }
+                let commandSource = payload.commands.count > 1
+                    ? "\(source)#\(offset + 1)/\(payload.commands.count)"
+                    : source
+                let allowsAutoAdvance = (offset == payload.commands.count - 1)
+                await evaluateCommand(command, source: commandSource, allowsAutoAdvance: allowsAutoAdvance)
+            }
         }
     }
 
-    private func recoverCommandFromPossiblyTruncatedJSON(_ rawJSON: String) -> SlideCommand? {
+    private enum CommandPayloadFormat: String {
+        case batch
+        case legacySingle
+    }
+
+    private struct ParsedCommandPayload {
+        let commands: [SlideCommand]
+        let format: CommandPayloadFormat
+        let recoveredFromTruncation: Bool
+        let normalizationNotes: [String]
+    }
+
+    private struct DelimiterBalance {
+        let unmatchedCurlyOpen: Int
+        let unmatchedSquareOpen: Int
+        let hasInvalidClosure: Bool
+        let hasOpenString: Bool
+    }
+
+    private func parseCommandPayload(argumentsJSON: String, source: String) -> ParsedCommandPayload? {
+        guard let jsonData = argumentsJSON.data(using: .utf8) else {
+            appendLog("Command decode failed: invalid UTF-8")
+            return nil
+        }
+
+        if let decoded = decodeCommandPayload(from: jsonData) {
+            let normalized = normalizeCommandSequence(decoded.commands)
+            return ParsedCommandPayload(
+                commands: normalized.commands,
+                format: decoded.format,
+                recoveredFromTruncation: false,
+                normalizationNotes: normalized.notes
+            )
+        }
+
+        if let recovered = recoverCommandsFromPossiblyTruncatedJSON(argumentsJSON) {
+            let normalized = normalizeCommandSequence(recovered.commands)
+            return ParsedCommandPayload(
+                commands: normalized.commands,
+                format: recovered.format,
+                recoveredFromTruncation: true,
+                normalizationNotes: normalized.notes
+            )
+        }
+
+        appendLog("Command decode failed: payload did not match command schema")
+        appendLog("Raw command payload [\(source)]: \(argumentsJSON)")
+        return nil
+    }
+
+    private func decodeCommandPayload(from data: Data) -> (commands: [SlideCommand], format: CommandPayloadFormat)? {
+        if let batch = try? jsonDecoder.decode(SlideCommandBatch.self, from: data),
+           !batch.commands.isEmpty {
+            return (batch.commands, .batch)
+        }
+
+        if let single = try? jsonDecoder.decode(SlideCommand.self, from: data) {
+            return ([single], .legacySingle)
+        }
+
+        return nil
+    }
+
+    private func normalizeCommandSequence(_ commands: [SlideCommand]) -> (commands: [SlideCommand], notes: [String]) {
+        var normalized = commands
+        var notes: [String] = []
+
+        if normalized.count > maxCommandsPerTurn {
+            let dropped = normalized.count - maxCommandsPerTurn
+            normalized = Array(normalized.prefix(maxCommandsPerTurn))
+            notes.append("Dropped \(dropped) command(s) beyond max batch size \(maxCommandsPerTurn)")
+        }
+
+        if normalized.count > 1 {
+            let withoutStay = normalized.filter { $0.action != .stay }
+            if !withoutStay.isEmpty && withoutStay.count != normalized.count {
+                let dropped = normalized.count - withoutStay.count
+                normalized = withoutStay
+                notes.append("Dropped \(dropped) stay command(s) from mixed batch")
+            }
+        }
+
+        if normalized.isEmpty, let fallback = commands.first {
+            normalized = [fallback]
+        }
+
+        var filtered: [SlideCommand] = []
+        var navigationSeen = false
+        var droppedNavigation = 0
+
+        for command in normalized {
+            if command.action.isNavigation {
+                if navigationSeen {
+                    droppedNavigation += 1
+                    continue
+                }
+                navigationSeen = true
+            }
+            filtered.append(command)
+        }
+
+        if droppedNavigation > 0 {
+            notes.append("Dropped \(droppedNavigation) extra navigation command(s); kept first")
+        }
+        normalized = filtered
+
+        if let firstNavigationIndex = normalized.firstIndex(where: { $0.action.isNavigation }),
+           firstNavigationIndex < normalized.count - 1 {
+            let dropped = normalized.count - firstNavigationIndex - 1
+            normalized = Array(normalized.prefix(firstNavigationIndex + 1))
+            notes.append("Dropped \(dropped) trailing command(s) after navigation")
+        }
+
+        if normalized.isEmpty {
+            let fallback = SlideCommand(
+                action: .stay,
+                targetSlide: nil,
+                markIndex: nil,
+                confidence: 1,
+                rationale: "normalized to stay fallback",
+                utteranceExcerpt: nil,
+                highlightPhrases: []
+            )
+            normalized = [fallback]
+            notes.append("Inserted fallback stay due empty command batch")
+        }
+
+        return (normalized, notes)
+    }
+
+    private func recoverCommandsFromPossiblyTruncatedJSON(_ rawJSON: String) -> (commands: [SlideCommand], format: CommandPayloadFormat)? {
+        guard let candidate = repairedJSONCandidate(from: rawJSON) else {
+            return nil
+        }
+
+        guard let data = candidate.data(using: .utf8) else {
+            return nil
+        }
+
+        return decodeCommandPayload(from: data)
+    }
+
+    private func repairedJSONCandidate(from rawJSON: String) -> String? {
         var candidate = rawJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         guard candidate.hasPrefix("{") else { return nil }
 
-        if !candidate.hasSuffix("}") {
-            candidate.append("}")
-        }
-
         candidate = candidate.replacingOccurrences(
-            of: ",\\s*}",
-            with: "}",
+            of: ",\\s*([}\\]])",
+            with: "$1",
             options: .regularExpression
         )
 
-        guard hasBalancedUnescapedDoubleQuotes(candidate) else { return nil }
-        guard let data = candidate.data(using: .utf8) else { return nil }
-        return try? jsonDecoder.decode(SlideCommand.self, from: data)
+        let balance = structuralDelimiterBalance(in: candidate)
+        guard !balance.hasInvalidClosure else { return nil }
+        guard !balance.hasOpenString else { return nil }
+
+        if balance.unmatchedSquareOpen > 0 {
+            candidate.append(String(repeating: "]", count: balance.unmatchedSquareOpen))
+        }
+        if balance.unmatchedCurlyOpen > 0 {
+            candidate.append(String(repeating: "}", count: balance.unmatchedCurlyOpen))
+        }
+
+        return candidate
     }
 
-    private func hasBalancedUnescapedDoubleQuotes(_ text: String) -> Bool {
+    private func structuralDelimiterBalance(in text: String) -> DelimiterBalance {
+        var unmatchedCurlyOpen = 0
+        var unmatchedSquareOpen = 0
+        var hasInvalidClosure = false
+        var isInsideString = false
         var isEscaped = false
-        var quoteCount = 0
 
-        for scalar in text.unicodeScalars {
+        for character in text {
             if isEscaped {
                 isEscaped = false
                 continue
             }
-            if scalar == "\\" {
-                isEscaped = true
+
+            if character == "\\" {
+                if isInsideString {
+                    isEscaped = true
+                }
                 continue
             }
-            if scalar == "\"" {
-                quoteCount += 1
+
+            if character == "\"" {
+                isInsideString.toggle()
+                continue
+            }
+
+            if isInsideString {
+                continue
+            }
+
+            switch character {
+            case "{":
+                unmatchedCurlyOpen += 1
+            case "}":
+                if unmatchedCurlyOpen == 0 {
+                    hasInvalidClosure = true
+                } else {
+                    unmatchedCurlyOpen -= 1
+                }
+            case "[":
+                unmatchedSquareOpen += 1
+            case "]":
+                if unmatchedSquareOpen == 0 {
+                    hasInvalidClosure = true
+                } else {
+                    unmatchedSquareOpen -= 1
+                }
+            default:
+                continue
+            }
+
+            if hasInvalidClosure {
+                break
             }
         }
 
-        return quoteCount.isMultiple(of: 2)
+        return DelimiterBalance(
+            unmatchedCurlyOpen: unmatchedCurlyOpen,
+            unmatchedSquareOpen: unmatchedSquareOpen,
+            hasInvalidClosure: hasInvalidClosure,
+            hasOpenString: isInsideString
+        )
     }
 
-    private func evaluateCommand(_ command: SlideCommand, source: String) async {
+    private func evaluateCommand(_ command: SlideCommand, source: String, allowsAutoAdvance: Bool) async {
         defer {
             if isSessionActive, !isSpeechDetected {
                 sessionPhase = .listening
@@ -593,7 +803,7 @@ final class AppViewModel: ObservableObject {
             appendLog("[RECOVERED][\(source)] \(markRecoveryNote)")
         }
 
-        applyHighlightPhrases(from: resolvedCommand, source: source)
+        let didApplyHighlights = applyHighlightPhrases(from: resolvedCommand, source: source)
 
         let policy = CommandPolicy(
             confidenceThreshold: settings.confidenceThreshold,
@@ -607,7 +817,12 @@ final class AppViewModel: ObservableObject {
         if decision.accepted {
             appendLog("[ACCEPTED][\(source)] \(commandSummary) | \(decision.reason)")
             appendActivity(activitySummary(for: decision.command), level: .success)
-            await applyAcceptedCommand(decision.command, source: source)
+            await applyAcceptedCommand(
+                decision.command,
+                source: source,
+                allowsAutoAdvance: allowsAutoAdvance,
+                didApplyHighlights: didApplyHighlights
+            )
         } else if decision.command.action == .stay && decision.reason == "model requested stay" {
             statusLine = "Model hold: no slide change"
             appendLog("[NOOP][\(source)] \(commandSummary) | \(decision.reason)")
@@ -622,7 +837,12 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func applyAcceptedCommand(_ command: SlideCommand, source: String) async {
+    private func applyAcceptedCommand(
+        _ command: SlideCommand,
+        source: String,
+        allowsAutoAdvance: Bool,
+        didApplyHighlights: Bool
+    ) async {
         guard let deck else {
             statusLine = "Accepted command ignored: no deck"
             appendLog("[APPLIED][\(source)] ignored accepted \(command.action.rawValue): no deck loaded")
@@ -641,6 +861,13 @@ final class AppViewModel: ObservableObject {
                 appendActivity("AI requested next", detail: "Already on last slide")
                 return
             }
+            guard await waitForHighlightVisibilityIfNeeded(
+                shouldWait: didApplyHighlights,
+                source: source,
+                fromSlideIndex: previousIndex
+            ) else {
+                return
+            }
 
             currentSlideIndex = nextIndex
             statusLine = "Accepted next: slide \(nextIndex)"
@@ -653,6 +880,13 @@ final class AppViewModel: ObservableObject {
                 statusLine = "Accepted previous (already at first slide)"
                 appendLog("[APPLIED][\(source)] previous ignored: already at first slide \(previousIndex)")
                 appendActivity("AI requested previous", detail: "Already on first slide")
+                return
+            }
+            guard await waitForHighlightVisibilityIfNeeded(
+                shouldWait: didApplyHighlights,
+                source: source,
+                fromSlideIndex: previousIndex
+            ) else {
                 return
             }
 
@@ -678,6 +912,13 @@ final class AppViewModel: ObservableObject {
                 statusLine = "Accepted goto: already on slide \(targetSlide)"
                 appendLog("[APPLIED][\(source)] goto ignored: already on slide \(targetSlide)")
                 appendActivity("AI requested slide \(targetSlide)", detail: "Already on that slide")
+                return
+            }
+            guard await waitForHighlightVisibilityIfNeeded(
+                shouldWait: didApplyHighlights,
+                source: source,
+                fromSlideIndex: previousIndex
+            ) else {
                 return
             }
 
@@ -727,6 +968,10 @@ final class AppViewModel: ObservableObject {
             let lastSegmentIndex = segments.map(\.index).max()
             let markedLastSegment = (lastSegmentIndex == markIndex)
             if allRequiredMarked || markedLastSegment {
+                guard allowsAutoAdvance else {
+                    appendLog("[AUTO][\(source)] coverage reached; auto-advance deferred until final command in turn")
+                    return
+                }
                 let nextIndex = deck.clampedSlideIndex(slideIndex + 1)
                 if nextIndex != slideIndex {
                     let shouldDelayAdvance =
@@ -795,7 +1040,7 @@ final class AppViewModel: ObservableObject {
         return parts.joined(separator: " ")
     }
 
-    private func applyHighlightPhrases(from command: SlideCommand, source: String) {
+    private func applyHighlightPhrases(from command: SlideCommand, source: String) -> Bool {
         let phraseCandidates = command.highlightPhrases ?? []
         let candidates: [String]
         if phraseCandidates.isEmpty {
@@ -806,7 +1051,7 @@ final class AppViewModel: ObservableObject {
         let sanitized = sanitizeHighlightPhrases(candidates)
 
         guard !sanitized.isEmpty else {
-            return
+            return false
         }
 
         let slideIndex = currentSlideIndex
@@ -825,7 +1070,7 @@ final class AppViewModel: ObservableObject {
         }
 
         guard addedCount > 0 else {
-            return
+            return false
         }
 
         let maxHighlightsPerSlide = 20
@@ -834,6 +1079,29 @@ final class AppViewModel: ObservableObject {
         }
         highlightedPhrasesBySlide[slideIndex] = existing
         appendLog("[HIGHLIGHT][\(source)] slide \(slideIndex) +\(addedCount)")
+        return true
+    }
+
+    private func waitForHighlightVisibilityIfNeeded(
+        shouldWait: Bool,
+        source: String,
+        fromSlideIndex: Int
+    ) async -> Bool {
+        guard shouldWait else {
+            return true
+        }
+
+        appendLog("[NAV][\(source)] delaying navigation 1.00s for highlight visibility")
+        try? await Task.sleep(for: .seconds(1))
+        guard !Task.isCancelled else {
+            appendLog("[NAV][\(source)] delayed navigation canceled: command task canceled")
+            return false
+        }
+        guard currentSlideIndex == fromSlideIndex else {
+            appendLog("[NAV][\(source)] delayed navigation canceled: slide changed during highlight hold")
+            return false
+        }
+        return true
     }
 
     private func sanitizeHighlightPhrases(_ phrases: [String]) -> [String] {
@@ -1591,7 +1859,7 @@ final class AppViewModel: ObservableObject {
         if let sourceURL {
             deckFilePath = sourceURL.path
             if sourceURL.isFileURL {
-                UserDefaults.standard.set(sourceURL.path, forKey: Self.lastOpenedDeckPathDefaultsKey)
+                persistLastOpenedDeckReference(sourceURL)
             }
         }
         currentSlideIndex = loadedDeck.clampedSlideIndex(currentSlideIndex)
@@ -1628,27 +1896,120 @@ final class AppViewModel: ObservableObject {
     }()
 
     private static let lastOpenedDeckPathDefaultsKey = "lastOpenedDeckPath"
+    private static let lastOpenedDeckBookmarkDefaultsKey = "lastOpenedDeckBookmark"
     private static let logFileName = "runtime/command-log.txt"
+
+    func debugLog(_ message: String) {
+        appendLog(message)
+    }
+
+    func shouldPreferLastOpenedDeck(over incomingDocumentURL: URL?) -> Bool {
+        guard let incomingDocumentURL else {
+            return true
+        }
+        guard incomingDocumentURL.isFileURL else {
+            return false
+        }
+        guard let storedPath = UserDefaults.standard.string(forKey: Self.lastOpenedDeckPathDefaultsKey) else {
+            return false
+        }
+        let normalizedIncomingPath = incomingDocumentURL.standardizedFileURL.path
+        let normalizedStoredPath = URL(fileURLWithPath: storedPath).standardizedFileURL.path
+        return normalizedIncomingPath == normalizedStoredPath
+    }
 
     @discardableResult
     func restoreLastOpenedDeckIfAvailable() -> Bool {
-        guard let path = UserDefaults.standard.string(forKey: Self.lastOpenedDeckPathDefaultsKey) else {
-            return false
-        }
-        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedPath.isEmpty else {
-            return false
-        }
-        guard FileManager.default.fileExists(atPath: trimmedPath) else {
-            UserDefaults.standard.removeObject(forKey: Self.lastOpenedDeckPathDefaultsKey)
-            appendLog("Last opened deck path no longer exists: \(trimmedPath)")
+        guard let url = resolveLastOpenedDeckURL() else {
+            appendLog("Last deck restore skipped: no resolved URL")
             return false
         }
 
-        deckFilePath = trimmedPath
-        loadDeckFromPath()
-        appendLog("Restored last opened deck from previous session")
-        return deck != nil
+        let didStartSecurityScope = url.startAccessingSecurityScopedResource()
+        appendLog("Attempting last deck restore from \(url.path), didStartSecurityScope=\(didStartSecurityScope)")
+        defer {
+            if didStartSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let loadedDeck = try PresentationDeckLoader.load(from: url)
+            applyLoadedDeck(loadedDeck, sourceURL: url, sourceDescription: url.path)
+            appendLog("Restored last opened deck from previous session")
+            return true
+        } catch {
+            appendLog("Failed to restore last opened deck: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func persistLastOpenedDeckReference(_ url: URL) {
+        let defaults = UserDefaults.standard
+        defaults.set(url.path, forKey: Self.lastOpenedDeckPathDefaultsKey)
+
+        do {
+            let bookmarkData = try url.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            defaults.set(bookmarkData, forKey: Self.lastOpenedDeckBookmarkDefaultsKey)
+        } catch {
+            appendLog("Failed to persist last opened deck bookmark: \(error.localizedDescription)")
+            defaults.removeObject(forKey: Self.lastOpenedDeckBookmarkDefaultsKey)
+        }
+    }
+
+    private func resolveLastOpenedDeckURL() -> URL? {
+        let defaults = UserDefaults.standard
+
+        if let bookmarkData = defaults.data(forKey: Self.lastOpenedDeckBookmarkDefaultsKey) {
+            var bookmarkIsStale = false
+            do {
+                let bookmarkedURL = try URL(
+                    resolvingBookmarkData: bookmarkData,
+                    options: [.withoutUI, .withSecurityScope],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &bookmarkIsStale
+                )
+
+                guard bookmarkedURL.isFileURL else {
+                    defaults.removeObject(forKey: Self.lastOpenedDeckBookmarkDefaultsKey)
+                    return nil
+                }
+
+                guard FileManager.default.fileExists(atPath: bookmarkedURL.path) else {
+                    defaults.removeObject(forKey: Self.lastOpenedDeckBookmarkDefaultsKey)
+                    defaults.removeObject(forKey: Self.lastOpenedDeckPathDefaultsKey)
+                    appendLog("Last opened deck no longer exists: \(bookmarkedURL.path)")
+                    return nil
+                }
+
+                if bookmarkIsStale {
+                    persistLastOpenedDeckReference(bookmarkedURL)
+                }
+
+                return bookmarkedURL
+            } catch {
+                defaults.removeObject(forKey: Self.lastOpenedDeckBookmarkDefaultsKey)
+                appendLog("Failed to resolve last opened deck bookmark: \(error.localizedDescription)")
+            }
+        }
+
+        guard let path = defaults.string(forKey: Self.lastOpenedDeckPathDefaultsKey) else {
+            return nil
+        }
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else {
+            return nil
+        }
+        guard FileManager.default.fileExists(atPath: trimmedPath) else {
+            defaults.removeObject(forKey: Self.lastOpenedDeckPathDefaultsKey)
+            appendLog("Last opened deck path no longer exists: \(trimmedPath)")
+            return nil
+        }
+        return URL(fileURLWithPath: trimmedPath)
     }
 
     private static func resolveLogFileURL() -> URL? {
