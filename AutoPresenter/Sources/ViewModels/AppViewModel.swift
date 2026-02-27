@@ -352,13 +352,21 @@ final class AppViewModel: ObservableObject {
 
     private func evaluateCommand(_ command: SlideCommand, source: String) async {
         let slideIndices = deck?.slideIndices ?? []
+        let (resolvedCommand, recoveryNote) = recoverGotoTargetIfMissing(
+            command: command,
+            validSlideIndices: slideIndices
+        )
+        if let recoveryNote {
+            appendLog("[RECOVERED][\(source)] \(recoveryNote)")
+        }
+
         let policy = CommandPolicy(
             confidenceThreshold: confidenceThreshold,
             cooldownSeconds: cooldownSeconds,
             dwellSeconds: dwellSeconds
         )
 
-        let decision = await safetyGate.evaluate(command: command, validSlideIndices: slideIndices, policy: policy)
+        let decision = await safetyGate.evaluate(command: resolvedCommand, validSlideIndices: slideIndices, policy: policy)
         let commandSummary = summarize(command: decision.command)
 
         if decision.accepted {
@@ -445,6 +453,112 @@ final class AppViewModel: ObservableObject {
             parts.append("rationale=\(command.rationale)")
         }
         return parts.joined(separator: " ")
+    }
+
+    private func recoverGotoTargetIfMissing(
+        command: SlideCommand,
+        validSlideIndices: Set<Int>
+    ) -> (command: SlideCommand, recoveryNote: String?) {
+        guard command.action == .goto else {
+            return (command, nil)
+        }
+
+        guard command.targetSlide == nil else {
+            return (command, nil)
+        }
+
+        guard let deck else {
+            return (command, nil)
+        }
+
+        let analysisText = [command.utteranceExcerpt, command.rationale]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .lowercased()
+
+        guard !analysisText.isEmpty else {
+            return (command, nil)
+        }
+
+        let inferredTarget: Int?
+        let sourceLabel: String
+
+        if mentionsFirstSlide(in: analysisText) {
+            inferredTarget = deck.firstSlideIndex
+            sourceLabel = "first-slide phrase"
+        } else if mentionsLastSlide(in: analysisText) {
+            inferredTarget = deck.lastSlideIndex
+            sourceLabel = "last-slide phrase"
+        } else if let referencedNumber = extractReferencedSlideNumber(from: analysisText) {
+            inferredTarget = referencedNumber
+            sourceLabel = "numeric slide reference"
+        } else {
+            inferredTarget = nil
+            sourceLabel = ""
+        }
+
+        guard let inferredTarget, validSlideIndices.contains(inferredTarget) else {
+            return (command, nil)
+        }
+
+        let recoveredCommand = SlideCommand(
+            action: .goto,
+            targetSlide: inferredTarget,
+            confidence: command.confidence,
+            rationale: command.rationale,
+            utteranceExcerpt: command.utteranceExcerpt
+        )
+
+        let note = "Inferred goto target=\(inferredTarget) from \(sourceLabel)"
+        return (recoveredCommand, note)
+    }
+
+    private func mentionsFirstSlide(in text: String) -> Bool {
+        text.contains("first slide")
+            || text.contains("slide one")
+            || text.contains("slide 1")
+            || text.contains("back to the start")
+            || text.contains("go to the start")
+            || text.contains("back to start")
+            || text.contains("start of the deck")
+    }
+
+    private func mentionsLastSlide(in text: String) -> Bool {
+        text.contains("last slide")
+            || text.contains("final slide")
+            || text.contains("go to the end")
+            || text.contains("end of the deck")
+    }
+
+    private func extractReferencedSlideNumber(from text: String) -> Int? {
+        let patterns = [
+            #"(?i)\bslide\s*(?:number\s*)?(\d{1,3})\b"#,
+            #"(?i)\b(\d{1,3})(?:st|nd|rd|th)\s+slide\b"#
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                continue
+            }
+
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard let match = regex.firstMatch(in: text, options: [], range: range) else {
+                continue
+            }
+
+            guard
+                match.numberOfRanges > 1,
+                let numberRange = Range(match.range(at: 1), in: text),
+                let number = Int(text[numberRange])
+            else {
+                continue
+            }
+
+            return number
+        }
+
+        return nil
     }
 
     private func formatLogNumber(_ value: Double) -> String {
