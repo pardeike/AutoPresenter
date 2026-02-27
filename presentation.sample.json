@@ -1,0 +1,60 @@
+{
+  "presentation_title": "Prototype Realtime Slide Pilot",
+  "language": "en",
+  "slides": [
+    {
+      "index": 1,
+      "title": "Opening and Motivation",
+      "bullets": [
+        "Why this project exists",
+        "What this prototype should achieve"
+      ],
+      "notes": "Set context and goals. Do not deep dive yet.",
+      "keywords": ["opening", "goals", "motivation"]
+    },
+    {
+      "index": 2,
+      "title": "System Architecture",
+      "bullets": [
+        "Mic capture and transport",
+        "Realtime model session",
+        "Command safety gate"
+      ],
+      "notes": "Walk through the signal flow left to right. Mention feedback loop.",
+      "keywords": ["architecture", "flow", "realtime", "feedback"]
+    },
+    {
+      "index": 3,
+      "title": "Safety and Reliability",
+      "bullets": [
+        "Schema validation",
+        "Confidence thresholds",
+        "Cooldown and dwell"
+      ],
+      "notes": "Stress that command execution is gated before any slide control action.",
+      "keywords": ["safety", "validation", "confidence", "cooldown"]
+    },
+    {
+      "index": 4,
+      "title": "Live Demo",
+      "bullets": [
+        "Model hears speech",
+        "Model emits structured command",
+        "App logs accepted/rejected commands"
+      ],
+      "notes": "Speak naturally and let the prototype infer when to move.",
+      "keywords": ["demo", "logging", "commands"]
+    },
+    {
+      "index": 5,
+      "title": "Wrap-up",
+      "bullets": [
+        "What worked",
+        "Known limitations",
+        "Next iteration"
+      ],
+      "notes": "Close with practical next steps: Keynote control integration and slide feedback sync.",
+      "keywords": ["summary", "limitations", "next steps"]
+    }
+  ]
+}

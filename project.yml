@@ -1,0 +1,28 @@
+name: AutoPresenter
+options:
+  minimumXcodeGenVersion: 2.38.0
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_STRICT_MEMORY_SAFETY: YES
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    OTHER_SWIFT_FLAGS: $(inherited) -strict-concurrency=complete -warnings-as-errors
+targets:
+  AutoPresenter:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: AutoPresenter/Sources
+    resources:
+      - path: AutoPresenter/Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ap.autopresenter
+        INFOPLIST_FILE: AutoPresenter/Resources/Info.plist
+        CODE_SIGN_STYLE: Automatic
