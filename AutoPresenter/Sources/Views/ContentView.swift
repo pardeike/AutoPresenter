@@ -72,7 +72,8 @@ struct ContentView: View {
                 LargeSlidePreview(
                     slide: slide,
                     highlightPhrases: viewModel.currentSlideHighlightPhrases,
-                    markedSegmentIndices: viewModel.currentSlideMarkedSegmentIndices
+                    markedSegmentIndices: viewModel.currentSlideMarkedSegmentIndices,
+                    deckDirectoryPath: viewModel.deckDirectoryPathForImages
                 )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
@@ -308,10 +309,18 @@ private struct LargeSlidePreview: View {
     let slide: PresentationSlide
     let highlightPhrases: [String]
     let markedSegmentIndices: Set<Int>
+    let deckDirectoryPath: String?
     private let headerMinHeight: CGFloat = 128
 
     private var segmentBuckets: SlideSegmentBuckets {
         slide.segmentBuckets()
+    }
+
+    private var imageEntries: [SlideImagePathEntry] {
+        SlideImagePathResolver.resolveEntries(
+            from: slide.imagePlaceholderParagraphs,
+            deckDirectoryPath: deckDirectoryPath
+        )
     }
 
     private var normalizedHighlightPhrases: [String] {
@@ -390,18 +399,9 @@ private struct LargeSlidePreview: View {
                 }
             }
         case .image:
-            if !segmentBuckets.imagePlaceholder.isEmpty {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(.black.opacity(0.06))
-                    .overlay(
-                        VStack(alignment: .leading, spacing: 10) {
-                            ForEach(segmentBuckets.imagePlaceholder, id: \.index) { segment in
-                                segmentTextRow(segment, font: .body)
-                            }
-                        }
-                        .padding(10)
-                    )
-                    .frame(minHeight: 180)
+            if !imageEntries.isEmpty {
+                imagePathGrid
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !segmentBuckets.caption.isEmpty {
                 ForEach(segmentBuckets.caption, id: \.index) { segment in
@@ -492,6 +492,61 @@ private struct LargeSlidePreview: View {
                 from: segment.text,
                 isMarkedByIndex: markedSegmentIndices.contains(segment.index)
             )
+        )
+    }
+
+    private var imagePathGrid: some View {
+        let columns = imageGridColumns(for: imageEntries.count)
+        return LazyVGrid(columns: columns, spacing: 10) {
+            ForEach(Array(imageEntries.enumerated()), id: \.offset) { _, entry in
+                imagePreviewCell(entry)
+            }
+        }
+    }
+
+    private func imageGridColumns(for count: Int) -> [GridItem] {
+        let numberOfColumns: Int
+        switch count {
+        case 0...1:
+            numberOfColumns = 1
+        case 2:
+            numberOfColumns = 2
+        case 3...4:
+            numberOfColumns = 2
+        default:
+            numberOfColumns = 3
+        }
+        return Array(repeating: GridItem(.flexible(), spacing: 10), count: numberOfColumns)
+    }
+
+    private func imagePreviewCell(_ entry: SlideImagePathEntry) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.black)
+
+            if let image = SlideImageLoader.shared.image(for: entry) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(8)
+            } else {
+                VStack(spacing: 6) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 20, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.72))
+                    Text(entry.displayName)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.white.opacity(0.72))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, 8)
+                }
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(.black.opacity(0.28), lineWidth: 1)
         )
     }
 
@@ -594,7 +649,8 @@ private final class AppPresenterWindowBridge: ObservableObject, PresenterWindowB
             markedSegmentIndices: viewModel.currentSlideMarkedSegmentIndices,
             sessionPhase: viewModel.sessionPhase,
             isSessionTransitioning: viewModel.isSessionTransitioning,
-            canToggleSession: viewModel.canToggleSession
+            canToggleSession: viewModel.canToggleSession,
+            deckDirectoryPath: viewModel.deckDirectoryPathForImages
         )
     }
 }
@@ -729,6 +785,41 @@ private struct PresentationEditorRootView: View {
                                 minHeight: 56,
                                 maxHeight: 56
                             )
+                            if draft.layout == .image {
+                                HStack(alignment: .top, spacing: 16) {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("Presentation Style")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                        Picker("Presentation Style", selection: $draft.imagePresentationStyle) {
+                                            ForEach(ImagePresentationStyle.allCases, id: \.self) { style in
+                                                Text(imagePresentationStyleLabel(style))
+                                                    .tag(style)
+                                            }
+                                        }
+                                        .labelsHidden()
+                                        .pickerStyle(.menu)
+                                        .frame(width: 180, alignment: .leading)
+                                    }
+
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("Scroll Speed (pt/s)")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                        TextField(
+                                            "34",
+                                            value: $draft.imageScrollSpeed,
+                                            format: .number.precision(.fractionLength(0...2))
+                                        )
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 130)
+                                        Text("Negative reverses direction")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                            }
                             if draft.layout != .image {
                                 LineTextEditor(
                                     title: "Subtitle",
@@ -758,8 +849,8 @@ private struct PresentationEditorRootView: View {
                                 )
                             case .image:
                                 LineTextEditor(
-                                    title: "Image Placeholder",
-                                    caption: "One line per image placeholder paragraph",
+                                    title: "Image Paths",
+                                    caption: "One path per line (absolute or ./ relative); optional :NN% to scale in presenter",
                                     text: $draft.imageText,
                                     minHeight: 100
                                 )
@@ -930,6 +1021,13 @@ private struct PresentationEditorRootView: View {
         }
         return "\(title) — \(subtitle)"
     }
+
+    private func imagePresentationStyleLabel(_ style: ImagePresentationStyle) -> String {
+        switch style {
+        case .scroll:
+            return "Scroll"
+        }
+    }
 }
 
 private struct SlideTypeBadgeView: View {
@@ -1067,6 +1165,8 @@ private struct EditableSlideDraft {
     var bulletsText: String
     var quoteText: String
     var imageText: String
+    var imagePresentationStyle: ImagePresentationStyle
+    var imageScrollSpeed: Double
     var captionText: String
     var leftTitleText: String
     var leftBulletsText: String
@@ -1080,6 +1180,8 @@ private struct EditableSlideDraft {
         bulletsText: String,
         quoteText: String,
         imageText: String,
+        imagePresentationStyle: ImagePresentationStyle,
+        imageScrollSpeed: Double,
         captionText: String,
         leftTitleText: String,
         leftBulletsText: String,
@@ -1092,6 +1194,8 @@ private struct EditableSlideDraft {
         self.bulletsText = bulletsText
         self.quoteText = quoteText
         self.imageText = imageText
+        self.imagePresentationStyle = imagePresentationStyle
+        self.imageScrollSpeed = imageScrollSpeed
         self.captionText = captionText
         self.leftTitleText = leftTitleText
         self.leftBulletsText = leftBulletsText
@@ -1106,6 +1210,8 @@ private struct EditableSlideDraft {
         bulletsText: "",
         quoteText: "",
         imageText: "",
+        imagePresentationStyle: .scroll,
+        imageScrollSpeed: PresentationSlide.defaultImageScrollSpeed,
         captionText: "",
         leftTitleText: "",
         leftBulletsText: "",
@@ -1120,6 +1226,8 @@ private struct EditableSlideDraft {
         bulletsText = slide.bullets.joined(separator: "\n")
         quoteText = slide.quoteParagraphs.joined(separator: "\n")
         imageText = slide.imagePlaceholderParagraphs.joined(separator: "\n")
+        imagePresentationStyle = slide.imagePresentationStyle
+        imageScrollSpeed = slide.imageScrollSpeed
         captionText = slide.captionParagraphs.joined(separator: "\n")
         leftTitleText = slide.leftColumn?.titleParagraphs.joined(separator: "\n") ?? ""
         leftBulletsText = slide.leftColumn?.bullets.joined(separator: "\n") ?? ""
@@ -1199,6 +1307,8 @@ private struct EditableSlideDraft {
             quoteParagraphs: quoteParagraphs,
             imagePlaceholder: imageParagraphs.joined(separator: " ").nilIfBlank,
             imagePlaceholderParagraphs: imageParagraphs,
+            imagePresentationStyle: imagePresentationStyle,
+            imageScrollSpeed: imageScrollSpeed,
             caption: captionParagraphs.joined(separator: " ").nilIfBlank,
             captionParagraphs: captionParagraphs,
             leftColumn: leftColumn,
@@ -1247,5 +1357,19 @@ private extension String {
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private extension AppViewModel {
+    var deckDirectoryPathForImages: String? {
+        if let loadedDeckURL, loadedDeckURL.isFileURL {
+            return loadedDeckURL.deletingLastPathComponent().path
+        }
+
+        let trimmedPath = deckFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: trimmedPath).deletingLastPathComponent().path
     }
 }

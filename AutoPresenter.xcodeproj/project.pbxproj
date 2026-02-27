@@ -14,8 +14,9 @@
 		527D5CF3B11843666394CBA2 /* SlideCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A64E77C8CFD8521357D15B6 /* SlideCommand.swift */; };
 		551BE548B142CB557E79D082 /* AutoPresenterApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36DD5B940AF001B29F7255BD /* AutoPresenterApp.swift */; };
 		6AB8DE148E687B5F99CB472E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA022A25C7397D5E115B8FB6 /* ContentView.swift */; };
+		AD75C40EDDA503CF25CE436D /* SlideImageSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 221EAF5F9A80AC24BFD638D4 /* SlideImageSupport.swift */; };
 		B4BA98B62F729709AB864C68 /* OpenAIRealtimeTokenService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */; };
-		C1D2E3F40516273849A5B6C7 /* RealtimeWebViewHostWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E2F30415263748A9B5C6D7 /* RealtimeWebViewHostWindow.swift */; };
+		BA2CD4FB57663ED8280DED08 /* RealtimeWebViewHostWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B02E142139BA6EC384AD2E7A /* RealtimeWebViewHostWindow.swift */; };
 		C5CA1CC93AD0671333AC73A2 /* RealtimeWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 979151427032FD08DB4317BB /* RealtimeWebView.swift */; };
 		D11959C722627409D682A8C1 /* CommandSafetyGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */; };
 		D93474E9906732722F208D66 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56BEB7603582D39D2FC92F4F /* AppSettings.swift */; };
@@ -24,6 +25,7 @@
 
 /* Begin PBXFileReference section */
 		0857895784714A3EA3759EFD /* AutoPresenter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AutoPresenter.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		221EAF5F9A80AC24BFD638D4 /* SlideImageSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideImageSupport.swift; sourceTree = "<group>"; };
 		325DC08317C1869106D99182 /* SafetyGateSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafetyGateSettingsView.swift; sourceTree = "<group>"; };
 		36DD5B940AF001B29F7255BD /* AutoPresenterApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoPresenterApp.swift; sourceTree = "<group>"; };
 		3A64E77C8CFD8521357D15B6 /* SlideCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideCommand.swift; sourceTree = "<group>"; };
@@ -33,7 +35,7 @@
 		92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandSafetyGate.swift; sourceTree = "<group>"; };
 		979151427032FD08DB4317BB /* RealtimeWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeWebView.swift; sourceTree = "<group>"; };
 		AA022A25C7397D5E115B8FB6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		D1E2F30415263748A9B5C6D7 /* RealtimeWebViewHostWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeWebViewHostWindow.swift; sourceTree = "<group>"; };
+		B02E142139BA6EC384AD2E7A /* RealtimeWebViewHostWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeWebViewHostWindow.swift; sourceTree = "<group>"; };
 		DC7B0E2124320E2E704B08DB /* PresenterWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenterWindow.swift; sourceTree = "<group>"; };
 		E63FBD596FC2031E285BDD70 /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
 		E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIRealtimeTokenService.swift; sourceTree = "<group>"; };
@@ -56,6 +58,7 @@
 				DC7B0E2124320E2E704B08DB /* PresenterWindow.swift */,
 				979151427032FD08DB4317BB /* RealtimeWebView.swift */,
 				325DC08317C1869106D99182 /* SafetyGateSettingsView.swift */,
+				221EAF5F9A80AC24BFD638D4 /* SlideImageSupport.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -104,7 +107,7 @@
 				92D9AE30C32FCD09B7411AEA /* CommandSafetyGate.swift */,
 				E67A4BB2B9B97D6DB1093228 /* OpenAIRealtimeTokenService.swift */,
 				673814A6B3F6AF99F63CE46C /* RealtimeWebBridge.swift */,
-				D1E2F30415263748A9B5C6D7 /* RealtimeWebViewHostWindow.swift */,
+				B02E142139BA6EC384AD2E7A /* RealtimeWebViewHostWindow.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -184,10 +187,11 @@
 				4E11D6B3C22ED5DBF3F8BB9F /* PresentationModels.swift in Sources */,
 				3854A94263254CFBF329CB3B /* PresenterWindow.swift in Sources */,
 				30248696E67240B3C05804E8 /* RealtimeWebBridge.swift in Sources */,
-				C1D2E3F40516273849A5B6C7 /* RealtimeWebViewHostWindow.swift in Sources */,
 				C5CA1CC93AD0671333AC73A2 /* RealtimeWebView.swift in Sources */,
+				BA2CD4FB57663ED8280DED08 /* RealtimeWebViewHostWindow.swift in Sources */,
 				F9A3B4A9D6E95A6986207367 /* SafetyGateSettingsView.swift in Sources */,
 				527D5CF3B11843666394CBA2 /* SlideCommand.swift in Sources */,
+				AD75C40EDDA503CF25CE436D /* SlideImageSupport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

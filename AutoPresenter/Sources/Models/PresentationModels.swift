@@ -117,6 +117,10 @@ enum SlideLayout: String, Sendable {
     case unknown
 }
 
+enum ImagePresentationStyle: String, Sendable, CaseIterable {
+    case scroll
+}
+
 struct SlideColumn: Sendable {
     let title: String
     let titleParagraphs: [String]
@@ -156,6 +160,8 @@ struct SlideSegmentBuckets: Sendable {
 }
 
 struct PresentationSlide: Identifiable, Sendable {
+    static let defaultImageScrollSpeed: Double = 34.0
+
     let index: Int
     let layout: SlideLayout
     let title: String
@@ -167,6 +173,8 @@ struct PresentationSlide: Identifiable, Sendable {
     let quoteParagraphs: [String]
     let imagePlaceholder: String?
     let imagePlaceholderParagraphs: [String]
+    let imagePresentationStyle: ImagePresentationStyle
+    let imageScrollSpeed: Double
     let caption: String?
     let captionParagraphs: [String]
     let leftColumn: SlideColumn?
@@ -318,6 +326,8 @@ struct PresentationSlide: Identifiable, Sendable {
             quoteParagraphs: quoteParagraphs,
             imagePlaceholder: imagePlaceholder,
             imagePlaceholderParagraphs: imagePlaceholderParagraphs,
+            imagePresentationStyle: imagePresentationStyle,
+            imageScrollSpeed: imageScrollSpeed,
             caption: caption,
             captionParagraphs: captionParagraphs,
             leftColumn: leftColumn,
@@ -411,6 +421,8 @@ private struct WritableSlideFile: Encodable {
     let bullets: [String]?
     let quote: [String]?
     let imagePlaceholder: [String]?
+    let imagePresentationStyle: String?
+    let imageScrollSpeed: Double?
     let caption: [String]?
     let left: WritableSlideColumnFile?
     let right: WritableSlideColumnFile?
@@ -428,14 +440,24 @@ private struct WritableSlideFile: Encodable {
         switch slide.layout {
         case .twoColumn:
             bullets = nil
+            imagePresentationStyle = nil
+            imageScrollSpeed = nil
         case .title:
             bullets = nil
+            imagePresentationStyle = nil
+            imageScrollSpeed = nil
         case .quote:
             bullets = nil
+            imagePresentationStyle = nil
+            imageScrollSpeed = nil
         case .image:
             bullets = nil
+            imagePresentationStyle = slide.imagePresentationStyle.rawValue
+            imageScrollSpeed = slide.imageScrollSpeed
         case .bullets, .unknown:
             bullets = slide.bullets.cleanedParagraphs().nilIfEmpty
+            imagePresentationStyle = nil
+            imageScrollSpeed = nil
         }
     }
 }
@@ -498,6 +520,8 @@ private struct SimpleSlideFile: Decodable {
             quoteParagraphs: [],
             imagePlaceholder: nil,
             imagePlaceholderParagraphs: [],
+            imagePresentationStyle: .scroll,
+            imageScrollSpeed: PresentationSlide.defaultImageScrollSpeed,
             caption: nil,
             captionParagraphs: [],
             leftColumn: nil,
@@ -512,6 +536,25 @@ private struct RichDeckFile: Decodable {
     let author: ParagraphValue?
     let language: String?
     let slides: [RichSlideFile]
+
+    enum CodingKeys: String, CodingKey {
+        case deckTitle = "deck_title"
+        case legacyDeckTitle = "deckTitle"
+        case subtitle
+        case author
+        case language
+        case slides
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        deckTitle = try container.decodeIfPresent(ParagraphValue.self, forKey: .deckTitle)
+            ?? container.decodeIfPresent(ParagraphValue.self, forKey: .legacyDeckTitle)
+        subtitle = try container.decodeIfPresent(ParagraphValue.self, forKey: .subtitle)
+        author = try container.decodeIfPresent(ParagraphValue.self, forKey: .author)
+        language = try container.decodeIfPresent(String.self, forKey: .language)
+        slides = try container.decode([RichSlideFile].self, forKey: .slides)
+    }
 
     func toDeck() -> PresentationDeck {
         let mappedSlides = slides.enumerated().map { offset, slide in
@@ -539,9 +582,46 @@ private struct RichSlideFile: Decodable {
     let bullets: [String]?
     let quote: ParagraphValue?
     let imagePlaceholder: ParagraphValue?
+    let imagePresentationStyle: String?
+    let imageScrollSpeed: Double?
     let caption: ParagraphValue?
     let left: RichSlideColumnFile?
     let right: RichSlideColumnFile?
+
+    enum CodingKeys: String, CodingKey {
+        case layout
+        case title
+        case subtitle
+        case bullets
+        case quote
+        case imagePlaceholder = "image_placeholder"
+        case legacyImagePlaceholder = "imagePlaceholder"
+        case imagePresentationStyle = "image_presentation_style"
+        case legacyImagePresentationStyle = "imagePresentationStyle"
+        case imageScrollSpeed = "image_scroll_speed"
+        case legacyImageScrollSpeed = "imageScrollSpeed"
+        case caption
+        case left
+        case right
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        layout = try container.decodeIfPresent(String.self, forKey: .layout)
+        title = try container.decodeIfPresent(ParagraphValue.self, forKey: .title)
+        subtitle = try container.decodeIfPresent(ParagraphValue.self, forKey: .subtitle)
+        bullets = try container.decodeIfPresent([String].self, forKey: .bullets)
+        quote = try container.decodeIfPresent(ParagraphValue.self, forKey: .quote)
+        imagePlaceholder = try container.decodeIfPresent(ParagraphValue.self, forKey: .imagePlaceholder)
+            ?? container.decodeIfPresent(ParagraphValue.self, forKey: .legacyImagePlaceholder)
+        imagePresentationStyle = try container.decodeIfPresent(String.self, forKey: .imagePresentationStyle)
+            ?? container.decodeIfPresent(String.self, forKey: .legacyImagePresentationStyle)
+        imageScrollSpeed = try container.decodeIfPresent(Double.self, forKey: .imageScrollSpeed)
+            ?? container.decodeIfPresent(Double.self, forKey: .legacyImageScrollSpeed)
+        caption = try container.decodeIfPresent(ParagraphValue.self, forKey: .caption)
+        left = try container.decodeIfPresent(RichSlideColumnFile.self, forKey: .left)
+        right = try container.decodeIfPresent(RichSlideColumnFile.self, forKey: .right)
+    }
 
     func toSlide(index: Int) -> PresentationSlide {
         let resolvedLayout = SlideLayout(rawValue: layout ?? "") ?? .unknown
@@ -557,6 +637,10 @@ private struct RichSlideFile: Decodable {
         let quoteParagraphs = (quote?.paragraphs ?? []).cleanedParagraphs()
         let imageParagraphs = (imagePlaceholder?.paragraphs ?? []).cleanedParagraphs()
         let captionParagraphs = (caption?.paragraphs ?? []).cleanedParagraphs()
+        let resolvedImagePresentationStyle = ImagePresentationStyle(
+            rawValue: imagePresentationStyle?.lowercased() ?? ""
+        ) ?? .scroll
+        let resolvedImageScrollSpeed = imageScrollSpeed ?? PresentationSlide.defaultImageScrollSpeed
 
         var mergedBullets = bulletItems
         if resolvedLayout == .twoColumn {
@@ -588,6 +672,8 @@ private struct RichSlideFile: Decodable {
             quoteParagraphs: quoteParagraphs,
             imagePlaceholder: imageParagraphs.joined(separator: " ").nilIfBlank,
             imagePlaceholderParagraphs: imageParagraphs,
+            imagePresentationStyle: resolvedImagePresentationStyle,
+            imageScrollSpeed: resolvedImageScrollSpeed,
             caption: captionParagraphs.joined(separator: " ").nilIfBlank,
             captionParagraphs: captionParagraphs,
             leftColumn: leftColumn,

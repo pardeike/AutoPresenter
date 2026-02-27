@@ -1995,6 +1995,7 @@ final class AppViewModel: ObservableObject {
                 persistLastOpenedDeckReference(sourceURL)
             }
         }
+        preflightImageFileAccess(for: loadedDeck, sourceURL: sourceURL)
         currentSlideIndex = loadedDeck.clampedSlideIndex(currentSlideIndex)
         statusLine = "Loaded deck: \(loadedDeck.presentationTitle)"
         appendLog("Loaded deck from \(sourceDescription) with \(loadedDeck.slides.count) slides")
@@ -2004,6 +2005,113 @@ final class AppViewModel: ObservableObject {
             level: .success
         )
         pushContextUpdate(reason: "deck load")
+    }
+
+    private func preflightImageFileAccess(for deck: PresentationDeck, sourceURL: URL?) {
+        let deckDirectoryURL: URL? = {
+            guard let sourceURL, sourceURL.isFileURL else {
+                return nil
+            }
+            return sourceURL.deletingLastPathComponent().standardizedFileURL
+        }()
+
+        var attemptedPaths = 0
+        var successfulPaths = 0
+        var visitedPaths = Set<String>()
+
+        for slide in deck.slides {
+            guard slide.layout == .image else {
+                continue
+            }
+
+            for rawPath in slide.imagePlaceholderParagraphs {
+                let normalized = normalizeImagePathForPreflight(rawPath)
+                guard !normalized.isEmpty else {
+                    continue
+                }
+                guard let fileURL = resolveImageFileURLForPreflight(normalized, deckDirectoryURL: deckDirectoryURL) else {
+                    continue
+                }
+
+                let standardizedPath = fileURL.standardizedFileURL.path
+                guard visitedPaths.insert(standardizedPath).inserted else {
+                    continue
+                }
+
+                attemptedPaths += 1
+                let didStartSecurityScope = fileURL.startAccessingSecurityScopedResource()
+                defer {
+                    if didStartSecurityScope {
+                        fileURL.stopAccessingSecurityScopedResource()
+                    }
+                }
+
+                do {
+                    let fileHandle = try FileHandle(forReadingFrom: fileURL)
+                    try fileHandle.close()
+                    successfulPaths += 1
+                } catch {
+                    // Access denial is expected when TCC prompt is declined or not yet granted.
+                }
+            }
+        }
+
+        if attemptedPaths > 0 {
+            appendLog("Preflighted image access for \(attemptedPaths) path(s), readable: \(successfulPaths)")
+        }
+    }
+
+    private func normalizeImagePathForPreflight(_ rawPath: String) -> String {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dequoted: String
+        if trimmed.count >= 2,
+           ((trimmed.hasPrefix("\"") && trimmed.hasSuffix("\"")) ||
+               (trimmed.hasPrefix("'") && trimmed.hasSuffix("'"))) {
+            dequoted = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            dequoted = trimmed
+        }
+
+        guard dequoted.hasSuffix("%"), let suffixStart = dequoted.lastIndex(of: ":") else {
+            return dequoted
+        }
+        let numberStart = dequoted.index(after: suffixStart)
+        let numberEnd = dequoted.index(before: dequoted.endIndex)
+        guard numberStart < numberEnd else {
+            return dequoted
+        }
+        let numberText = dequoted[numberStart..<numberEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let percentage = Double(numberText), percentage > 0 else {
+            return dequoted
+        }
+
+        let stripped = String(dequoted[..<suffixStart]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return stripped.isEmpty ? dequoted : stripped
+    }
+
+    private func resolveImageFileURLForPreflight(_ path: String, deckDirectoryURL: URL?) -> URL? {
+        if let parsedURL = URL(string: path), parsedURL.isFileURL {
+            return parsedURL.standardizedFileURL
+        }
+
+        if path.hasPrefix("~") {
+            let expandedPath = (path as NSString).expandingTildeInPath
+            return URL(fileURLWithPath: expandedPath).standardizedFileURL
+        }
+
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path).standardizedFileURL
+        }
+
+        if let deckDirectoryURL {
+            return URL(fileURLWithPath: path, relativeTo: deckDirectoryURL).standardizedFileURL
+        }
+
+        let currentDirectoryURL = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        )
+        return URL(fileURLWithPath: path, relativeTo: currentDirectoryURL).standardizedFileURL
     }
 
     private func applyEditedSlides(_ slides: [PresentationSlide], reason: String) {
@@ -2102,6 +2210,8 @@ final class AppViewModel: ObservableObject {
             quoteParagraphs: [],
             imagePlaceholder: nil,
             imagePlaceholderParagraphs: [],
+            imagePresentationStyle: .scroll,
+            imageScrollSpeed: PresentationSlide.defaultImageScrollSpeed,
             caption: nil,
             captionParagraphs: [],
             leftColumn: nil,

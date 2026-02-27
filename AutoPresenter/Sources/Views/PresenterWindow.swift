@@ -9,6 +9,7 @@ struct PresenterWindowState: Sendable {
     let sessionPhase: RealtimeSessionPhase
     let isSessionTransitioning: Bool
     let canToggleSession: Bool
+    let deckDirectoryPath: String?
 
     static let empty = PresenterWindowState(
         slide: nil,
@@ -16,7 +17,8 @@ struct PresenterWindowState: Sendable {
         markedSegmentIndices: [],
         sessionPhase: .idle,
         isSessionTransitioning: false,
-        canToggleSession: true
+        canToggleSession: true,
+        deckDirectoryPath: nil
     )
 }
 
@@ -350,7 +352,8 @@ private struct PresenterRootView: View {
                 PresenterSlideView(
                     slide: slide,
                     highlightPhrases: state.highlightPhrases,
-                    markedSegmentIndices: state.markedSegmentIndices
+                    markedSegmentIndices: state.markedSegmentIndices,
+                    deckDirectoryPath: state.deckDirectoryPath
                 )
             } else if !AppBuildFlags.strictFullscreenAudienceMode {
                 VStack(spacing: 16) {
@@ -447,9 +450,18 @@ private struct PresenterSlideView: View {
     let slide: PresentationSlide
     let highlightPhrases: [String]
     let markedSegmentIndices: Set<Int>
+    let deckDirectoryPath: String?
+    @State private var imageStageOpacity: Double = 1
 
     private var segmentBuckets: SlideSegmentBuckets {
         slide.segmentBuckets()
+    }
+
+    private var imageEntries: [SlideImagePathEntry] {
+        SlideImagePathResolver.resolveEntries(
+            from: slide.imagePlaceholderParagraphs,
+            deckDirectoryPath: deckDirectoryPath
+        )
     }
 
     private var normalizedHighlightPhrases: [String] {
@@ -467,14 +479,76 @@ private struct PresenterSlideView: View {
     }
 
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 34) {
-                header
-                contentBody
+        if slide.layout == .image {
+            imageSlideBody
+        } else {
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 34) {
+                    header
+                    contentBody
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 88)
+                .padding(.vertical, 76)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 88)
-            .padding(.vertical, 76)
+        }
+    }
+
+    private var imageSlideBody: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            header
+
+            imageStage
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .opacity(imageStageOpacity)
+                .onAppear {
+                    triggerImageFadeIn()
+                }
+                .onChange(of: slide.id) { _, _ in
+                    triggerImageFadeIn()
+                }
+
+            if !segmentBuckets.caption.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(segmentBuckets.caption, id: \.index) { segment in
+                        segmentText(segment)
+                            .font(.system(size: 30, weight: .regular, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.80))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 88)
+        .padding(.top, 72)
+        .padding(.bottom, 40)
+    }
+
+    @ViewBuilder
+    private var imageStage: some View {
+        if imageEntries.isEmpty {
+            VStack(spacing: 14) {
+                Image(systemName: "photo.on.rectangle.angled")
+                    .font(.system(size: 44, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.72))
+                Text("No images configured")
+                    .font(.system(size: 28, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.74))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if imageEntries.count <= 3 {
+            featuredImageLayout
+        } else {
+            switch slide.imagePresentationStyle {
+            case .scroll:
+                PresenterImageMarquee(
+                    imageEntries: imageEntries,
+                    speed: CGFloat(max(min(slide.imageScrollSpeed, 800.0), -800.0)),
+                    slideID: slide.id
+                )
+            }
         }
     }
 
@@ -513,28 +587,7 @@ private struct PresenterSlideView: View {
                 }
             }
         case .image:
-            if !segmentBuckets.imagePlaceholder.isEmpty {
-                RoundedRectangle(cornerRadius: 18)
-                    .fill(.white.opacity(0.10))
-                    .overlay(
-                        VStack(alignment: .leading, spacing: 14) {
-                            ForEach(segmentBuckets.imagePlaceholder, id: \.index) { segment in
-                                segmentText(segment)
-                                    .font(.system(size: 34, weight: .medium, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.90))
-                            }
-                        }
-                            .padding(26)
-                    )
-                    .frame(minHeight: 300)
-            }
-            if !segmentBuckets.caption.isEmpty {
-                ForEach(segmentBuckets.caption, id: \.index) { segment in
-                    segmentText(segment)
-                        .font(.system(size: 30, weight: .regular, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.78))
-                }
-            }
+            EmptyView()
         case .twoColumn:
             HStack(alignment: .top, spacing: 54) {
                 presenterColumn(
@@ -568,6 +621,87 @@ private struct PresenterSlideView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var featuredImageLayout: some View {
+        GeometryReader { proxy in
+            let scales = imageScaleFactors
+            let ratios = imageAspectRatios
+            let spacing = featuredImageSpacing
+            let horizontalGapCount = CGFloat(max(ratios.count - 1, 0))
+            let availableWidth = max(proxy.size.width - spacing * horizontalGapCount, 1)
+            let widthWeights = zip(ratios, scales).map { ratio, scale in
+                ratio * scale
+            }
+            let totalWidthWeight = max(widthWeights.reduce(0, +), 0.1)
+            let fittedBaseHeight = min(proxy.size.height, availableWidth / totalWidthWeight)
+
+            HStack(alignment: .center, spacing: featuredImageSpacing) {
+                ForEach(Array(imageEntries.enumerated()), id: \.offset) { index, entry in
+                    presenterImageCard(entry: entry)
+                        .frame(
+                            width: max(1, fittedBaseHeight * widthWeights[index]),
+                            height: max(1, fittedBaseHeight * scales[index])
+                        )
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+
+    private var featuredImageSpacing: CGFloat {
+        imageEntries.count == 1 ? 0 : 14
+    }
+
+    private var imageScaleFactors: [CGFloat] {
+        imageEntries.map { min(max($0.scaleFactor, 0.05), 3.0) }
+    }
+
+    private var imageAspectRatios: [CGFloat] {
+        imageEntries.map { entry in
+            guard
+                let image = SlideImageLoader.shared.image(for: entry),
+                image.size.height > 0
+            else {
+                return 1.25
+            }
+            let ratio = image.size.width / image.size.height
+            return max(min(ratio, 3.0), 0.45)
+        }
+    }
+
+    @ViewBuilder
+    private func presenterImageCard(entry: SlideImagePathEntry) -> some View {
+        if let image = SlideImageLoader.shared.image(for: entry) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            VStack(spacing: 10) {
+                Image(systemName: "photo")
+                    .font(.system(size: 44, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.76))
+                Text(entry.displayName)
+                    .font(.system(size: 18, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.76))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 18)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func triggerImageFadeIn() {
+        guard slide.layout == .image else {
+            imageStageOpacity = 1
+            return
+        }
+        imageStageOpacity = 0
+        withAnimation(.easeOut(duration: 0.22)) {
+            imageStageOpacity = 1
         }
     }
 
@@ -676,5 +810,135 @@ private struct PresenterSlideView: View {
         }
 
         return ranges
+    }
+}
+
+private struct PresenterImageMarquee: View {
+    let imageEntries: [SlideImagePathEntry]
+    let speed: CGFloat
+    let slideID: Int
+
+    private let spacing: CGFloat = 16
+    @State private var baseTravel: CGFloat = 0
+    @State private var animationStartDate: Date = .now
+
+    private var imageAspectRatios: [CGFloat] {
+        imageEntries.map { entry in
+            guard
+                let image = SlideImageLoader.shared.image(for: entry),
+                image.size.height > 0
+            else {
+                return 1.25
+            }
+            let ratio = image.size.width / image.size.height
+            return max(min(ratio, 3.0), 0.45)
+        }
+    }
+
+    private var imageScaleFactors: [CGFloat] {
+        imageEntries.map { min(max($0.scaleFactor, 0.05), 3.0) }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let cardHeight = max(proxy.size.height * 0.92, 140)
+            let scales = imageScaleFactors
+            let itemHeights = scales.map { max(cardHeight * $0, 24) }
+            let itemWidths = zip(imageAspectRatios, itemHeights).map { ratio, height in
+                let unclampedWidth = height * ratio
+                return min(max(unclampedWidth, 24), max(proxy.size.width * 0.72, 280))
+            }
+            let rowWidth = max(
+                itemWidths.reduce(0, +) + spacing * CGFloat(max(itemWidths.count - 1, 0)),
+                1
+            )
+            let repeatCount = max(2, Int(ceil(proxy.size.width / rowWidth)) + 3)
+
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+                let travel = currentTravel(at: context.date)
+                let offset = travel.truncatingRemainder(dividingBy: rowWidth)
+
+                HStack(spacing: 0) {
+                    ForEach(0..<repeatCount, id: \.self) { _ in
+                        marqueeRow(itemWidths: itemWidths, itemHeights: itemHeights)
+                    }
+                }
+                .offset(x: -offset)
+            }
+            .clipped()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            restoreProgress()
+        }
+        .onDisappear {
+            persistProgress()
+        }
+    }
+
+    private func marqueeRow(itemWidths: [CGFloat], itemHeights: [CGFloat]) -> some View {
+        HStack(spacing: spacing) {
+            ForEach(Array(imageEntries.enumerated()), id: \.offset) { index, entry in
+                marqueeCard(entry: entry, width: itemWidths[index], height: itemHeights[index])
+            }
+        }
+        .padding(.trailing, spacing)
+    }
+
+    private func marqueeCard(entry: SlideImagePathEntry, width: CGFloat, height: CGFloat) -> some View {
+        Group {
+            if let image = SlideImageLoader.shared.image(for: entry) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                VStack(spacing: 9) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 40, weight: .regular))
+                    Text(entry.displayName)
+                        .font(.system(size: 16, weight: .medium, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, 12)
+                }
+                .foregroundStyle(.white.opacity(0.74))
+            }
+        }
+        .frame(width: width, height: height, alignment: .center)
+    }
+
+    private func currentTravel(at date: Date) -> CGFloat {
+        guard speed != 0 else {
+            return baseTravel
+        }
+        let elapsed = CGFloat(date.timeIntervalSince(animationStartDate))
+        return baseTravel + (elapsed * speed)
+    }
+
+    private func restoreProgress() {
+        baseTravel = PresenterImageMarqueeProgressStore.shared.travel(for: slideID)
+        animationStartDate = Date()
+    }
+
+    private func persistProgress() {
+        let travel = currentTravel(at: Date())
+        PresenterImageMarqueeProgressStore.shared.setTravel(travel, for: slideID)
+    }
+}
+
+@MainActor
+private final class PresenterImageMarqueeProgressStore {
+    static let shared = PresenterImageMarqueeProgressStore()
+
+    private var travelBySlideID: [Int: CGFloat] = [:]
+
+    private init() {}
+
+    func travel(for slideID: Int) -> CGFloat {
+        travelBySlideID[slideID] ?? 0
+    }
+
+    func setTravel(_ travel: CGFloat, for slideID: Int) {
+        travelBySlideID[slideID] = travel
     }
 }
