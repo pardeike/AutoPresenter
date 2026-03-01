@@ -178,8 +178,10 @@ private struct MainWindowContent: View {
     var body: some View {
         ContentView(viewModel: viewModel)
             .onAppear {
-                if let activeWindow = NSApp.mainWindow ?? NSApp.keyWindow,
-                   isMainWindowCandidate(activeWindow) {
+                if let activeWindow = [NSApp.mainWindow, NSApp.keyWindow]
+                    .compactMap({ $0 })
+                    .first(where: isMainWindowCandidate)
+                    ?? NSApp.windows.first(where: isMainWindowCandidate) {
                     markManagedMainWindow(activeWindow)
                     MainWindowFramePersistence.shared.attach(window: activeWindow)
                     updateManagedWindowTitle(activeWindow)
@@ -201,9 +203,10 @@ private struct MainWindowContent: View {
                 guard let window = notification.object as? NSWindow else {
                     return
                 }
-                guard window.identifier == mainWindowIdentifier else {
+                guard isMainWindowCandidate(window) else {
                     return
                 }
+                markManagedMainWindow(window)
                 MainWindowFramePersistence.shared.attach(window: window)
                 updateManagedWindowTitle(window)
             }

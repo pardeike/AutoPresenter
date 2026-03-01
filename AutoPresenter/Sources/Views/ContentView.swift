@@ -683,6 +683,8 @@ private final class AppPresenterWindowBridge: ObservableObject, PresenterWindowB
 @MainActor
 final class PresentationEditorWindowManager: NSObject, NSWindowDelegate {
     private var window: NSWindow?
+    private let fallbackEditorContentSize = NSSize(width: 1320, height: 820)
+    private let preferredScreenPadding: CGFloat = 80
 
     func show(viewModel: AppViewModel, initialSlideIndex: Int?) {
         if let window {
@@ -693,11 +695,12 @@ final class PresentationEditorWindowManager: NSObject, NSWindowDelegate {
                 )
             }
             window.makeKeyAndOrderFront(nil)
+            applyDefaultSizeAndCenter(to: window)
             return
         }
 
         let editorWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1220, height: 760),
+            contentRect: NSRect(origin: .zero, size: fallbackEditorContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -706,7 +709,6 @@ final class PresentationEditorWindowManager: NSObject, NSWindowDelegate {
         editorWindow.minSize = NSSize(width: 980, height: 620)
         editorWindow.isReleasedWhenClosed = false
         editorWindow.delegate = self
-        editorWindow.center()
 
         let hostingController = NSHostingController(
             rootView: PresentationEditorRootView(
@@ -717,6 +719,7 @@ final class PresentationEditorWindowManager: NSObject, NSWindowDelegate {
         editorWindow.contentViewController = hostingController
         self.window = editorWindow
         editorWindow.makeKeyAndOrderFront(nil)
+        applyDefaultSizeAndCenter(to: editorWindow)
     }
 
     func close() {
@@ -725,6 +728,28 @@ final class PresentationEditorWindowManager: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         window = nil
+    }
+
+    private func applyDefaultSizeAndCenter(to window: NSWindow) {
+        guard let screen = window.screen ?? NSScreen.main else {
+            window.setContentSize(fallbackEditorContentSize)
+            window.center()
+            return
+        }
+
+        let visibleFrame = screen.visibleFrame
+        var targetFrame = visibleFrame.insetBy(dx: preferredScreenPadding, dy: preferredScreenPadding)
+
+        if targetFrame.width < window.minSize.width {
+            targetFrame.size.width = window.minSize.width
+            targetFrame.origin.x = visibleFrame.midX - (targetFrame.width / 2)
+        }
+        if targetFrame.height < window.minSize.height {
+            targetFrame.size.height = window.minSize.height
+            targetFrame.origin.y = visibleFrame.midY - (targetFrame.height / 2)
+        }
+
+        window.setFrame(targetFrame, display: true, animate: false)
     }
 }
 
