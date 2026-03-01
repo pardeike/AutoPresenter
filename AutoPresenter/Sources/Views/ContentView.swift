@@ -311,6 +311,12 @@ private struct LargeSlidePreview: View {
     let markedSegmentIndices: Set<Int>
     let deckDirectoryPath: String?
     private let headerMinHeight: CGFloat = 128
+    private let steelBackTop = Color(red: 0.11, green: 0.16, blue: 0.22)
+    private let steelBackBottom = Color(red: 0.05, green: 0.09, blue: 0.13)
+    private let steelDimText = Color(red: 0.58, green: 0.69, blue: 0.80).opacity(0.42)
+    private let steelDimSecondaryText = Color(red: 0.51, green: 0.62, blue: 0.73).opacity(0.34)
+    private let steelBrightText = Color(red: 0.92, green: 0.97, blue: 1.00)
+    private let steelChrome = Color(red: 0.38, green: 0.50, blue: 0.63).opacity(0.34)
 
     private var segmentBuckets: SlideSegmentBuckets {
         slide.segmentBuckets()
@@ -321,20 +327,6 @@ private struct LargeSlidePreview: View {
             from: slide.imagePlaceholderParagraphs,
             deckDirectoryPath: deckDirectoryPath
         )
-    }
-
-    private var normalizedHighlightPhrases: [String] {
-        var seen: Set<String> = []
-        let cleaned = highlightPhrases.compactMap { phrase -> String? in
-            let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.count >= 2 else { return nil }
-            guard trimmed.count <= 120 else { return nil }
-            let key = trimmed.lowercased()
-            guard !seen.contains(key) else { return nil }
-            seen.insert(key)
-            return trimmed
-        }
-        return cleaned.sorted { $0.count > $1.count }
     }
 
     var body: some View {
@@ -352,10 +344,10 @@ private struct LargeSlidePreview: View {
 
                     Text(slide.layout.rawValue.uppercased())
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(steelDimText)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(.black.opacity(0.08))
+                        .background(steelChrome)
                         .clipShape(Capsule())
                 }
 
@@ -381,11 +373,17 @@ private struct LargeSlidePreview: View {
         }
         .padding(22)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.black.opacity(0.04))
+        .background(
+            LinearGradient(
+                colors: [steelBackTop, steelBackBottom],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.black.opacity(0.12), lineWidth: 1)
+                .strokeBorder(steelChrome, lineWidth: 1)
         )
     }
 
@@ -456,7 +454,8 @@ private struct LargeSlidePreview: View {
             segmentIndexBadge(segment)
             Text("•")
                 .font(.title3.weight(.semibold))
-            segmentText(segment)
+                .foregroundStyle(steelDimText)
+            segmentText(segment, secondary: false)
                 .font(.title3)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -465,9 +464,8 @@ private struct LargeSlidePreview: View {
     private func segmentTextRow(_ segment: SlideMarkSegment, font: Font, secondary: Bool = false) -> some View {
         HStack(alignment: .top, spacing: 8) {
             segmentIndexBadge(segment)
-            segmentText(segment)
+            segmentText(segment, secondary: secondary)
                 .font(font)
-                .foregroundStyle(secondary ? .secondary : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -479,18 +477,19 @@ private struct LargeSlidePreview: View {
             Text(segment.kind)
                 .font(.caption2.weight(.medium))
         }
-        .foregroundStyle(.secondary)
+        .foregroundStyle(steelDimSecondaryText)
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(.black.opacity(0.08))
+        .background(steelChrome)
         .clipShape(Capsule())
     }
 
-    private func segmentText(_ segment: SlideMarkSegment) -> Text {
+    private func segmentText(_ segment: SlideMarkSegment, secondary: Bool) -> Text {
         Text(
             makeHighlightedAttributedString(
                 from: segment.text,
-                isMarkedByIndex: markedSegmentIndices.contains(segment.index)
+                isMarkedByIndex: markedSegmentIndices.contains(segment.index),
+                secondary: secondary
             )
         )
     }
@@ -522,7 +521,7 @@ private struct LargeSlidePreview: View {
     private func imagePreviewCell(_ entry: SlideImagePathEntry) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8)
-                .fill(.black)
+                .fill(steelBackBottom.opacity(0.88))
 
             if let image = SlideImageLoader.shared.image(for: entry) {
                 Image(nsImage: image)
@@ -533,10 +532,10 @@ private struct LargeSlidePreview: View {
                 VStack(spacing: 6) {
                     Image(systemName: "photo")
                         .font(.system(size: 20, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(steelDimText)
                     Text(entry.displayName)
                         .font(.caption2.monospaced())
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(steelDimText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .padding(.horizontal, 8)
@@ -546,64 +545,28 @@ private struct LargeSlidePreview: View {
         .aspectRatio(1, contentMode: .fit)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(.black.opacity(0.28), lineWidth: 1)
+                .strokeBorder(steelChrome, lineWidth: 1)
         )
     }
 
-    private func makeHighlightedAttributedString(from rawText: String, isMarkedByIndex: Bool) -> AttributedString {
+    private func makeHighlightedAttributedString(
+        from rawText: String,
+        isMarkedByIndex: Bool,
+        secondary: Bool
+    ) -> AttributedString {
         var attributed = AttributedString(rawText)
-
-        if isMarkedByIndex {
-            let fullRange = attributed.startIndex..<attributed.endIndex
-            attributed[fullRange].backgroundColor = .yellow.opacity(0.75)
-            attributed[fullRange].foregroundColor = .primary
+        guard !attributed.characters.isEmpty else {
+            return attributed
         }
 
-        for phrase in normalizedHighlightPhrases {
-            let ranges = highlightRanges(of: phrase, in: rawText)
-            for nsRange in ranges {
-                guard
-                    let stringRange = Range(nsRange, in: rawText),
-                    let lower = AttributedString.Index(stringRange.lowerBound, within: attributed),
-                    let upper = AttributedString.Index(stringRange.upperBound, within: attributed)
-                else {
-                    continue
-                }
+        let fullRange = attributed.startIndex..<attributed.endIndex
+        attributed[fullRange].foregroundColor = secondary ? steelDimSecondaryText : steelDimText
 
-                let highlightedRange = lower..<upper
-                attributed[highlightedRange].backgroundColor = .yellow.opacity(0.6)
-                attributed[highlightedRange].foregroundColor = .primary
-            }
+        if isMarkedByIndex {
+            attributed[fullRange].foregroundColor = steelBrightText
         }
 
         return attributed
-    }
-
-    private func highlightRanges(of phrase: String, in text: String) -> [NSRange] {
-        let nsText = text as NSString
-        var ranges: [NSRange] = []
-        var searchRange = NSRange(location: 0, length: nsText.length)
-
-        while searchRange.length > 0 {
-            let foundRange = nsText.range(
-                of: phrase,
-                options: [.caseInsensitive, .diacriticInsensitive],
-                range: searchRange
-            )
-
-            guard foundRange.location != NSNotFound else {
-                break
-            }
-
-            ranges.append(foundRange)
-            let nextLocation = foundRange.location + max(foundRange.length, 1)
-            guard nextLocation < nsText.length else {
-                break
-            }
-            searchRange = NSRange(location: nextLocation, length: nsText.length - nextLocation)
-        }
-
-        return ranges
     }
 }
 

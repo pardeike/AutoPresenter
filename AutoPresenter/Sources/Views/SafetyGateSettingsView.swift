@@ -38,7 +38,7 @@ struct SafetyGateSettingsView: View {
             }
         }
         .padding(18)
-        .frame(minWidth: 460, minHeight: 240, alignment: .topLeading)
+        .frame(minWidth: 360, idealWidth: 390, maxWidth: 420, minHeight: 230, alignment: .topLeading)
     }
 
     private func settingsSlider(

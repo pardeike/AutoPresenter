@@ -14,35 +14,35 @@
       action: {
         type: "string",
         enum: ["next", "previous", "goto", "mark", "stay"],
-        description: "Slide control action",
+        description: "Slide control action. Must be one of next|previous|goto|mark|stay.",
       },
       target_slide: {
         type: ["integer", "null"],
-        description: "Required when action is goto, otherwise null",
+        description: "MUST be integer only when action=goto. MUST be null for all other actions.",
       },
       mark_index: {
         type: ["integer", "null"],
-        description: "Required and non-null when action is mark, otherwise null",
+        description: "MUST be integer only when action=mark. MUST be null for all other actions.",
       },
       confidence: {
         type: "number",
         minimum: 0,
         maximum: 1,
-        description: "Model confidence in the command",
+        description: "Model confidence in [0,1].",
       },
       rationale: {
         type: "string",
-        description: "Short factual explanation for the selected action (4-10 words)",
+        description: "Short factual explanation (4-10 words). No flourish.",
       },
       utterance_excerpt: {
         type: ["string", "null"],
-        description: "Optional exact excerpt of the triggering utterance (max 10 words)",
+        description: "Exact quote from utterance (max 10 words) or null.",
       },
       highlight_phrases: {
         type: "array",
         items: { type: "string" },
         maxItems: 5,
-        description: "Optional phrases from current slide to highlight based on what was just said; [] when none",
+        description: "0-5 exact current-slide substrings only. Use [] when none.",
       },
     },
     required: ["action", "target_slide", "mark_index", "confidence", "rationale", "utterance_excerpt", "highlight_phrases"],
@@ -51,7 +51,7 @@
   const commandToolSchema = {
     type: "function",
     name: "emit_slide_command",
-    description: "Return one ordered command batch for slide navigation/highlighting based on presenter speech and current slide context.",
+    description: "Strict command contract. Return one ordered command batch for this turn. Invalid, partial, or schema-breaking payloads are rejected.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -61,7 +61,7 @@
           minItems: 1,
           maxItems: 6,
           items: commandEntrySchema,
-          description: "Ordered atomic commands for this speech turn",
+          description: "Ordered atomic commands for this speech turn. Use stay when uncertain.",
         },
       },
       required: ["commands"],
@@ -127,11 +127,11 @@
             type: turnDetection?.type ?? "server_vad",
             create_response: turnDetection?.create_response ?? true,
             interrupt_response: turnDetection?.interrupt_response ?? true,
-            silence_duration_ms: turnDetection?.silence_duration_ms ?? 180,
+            silence_duration_ms: turnDetection?.silence_duration_ms ?? 420,
           },
         },
       },
-      max_output_tokens: 420,
+      max_output_tokens: 720,
     };
   }
 

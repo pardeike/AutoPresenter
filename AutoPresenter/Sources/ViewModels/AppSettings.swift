@@ -45,9 +45,9 @@ final class AppSettings: ObservableObject {
         let storedCooldown = defaults.object(forKey: Self.cooldownSecondsKey) as? Double
         let storedDwell = defaults.object(forKey: Self.dwellSecondsKey) as? Double
 
-        confidenceThreshold = min(max(storedConfidence ?? 0.70, 0.0), 1.0)
-        cooldownSeconds = min(max(storedCooldown ?? 1.20, 0.0), 5.0)
-        dwellSeconds = min(max(storedDwell ?? 0.00, 0.0), 3.0)
+        confidenceThreshold = min(max(storedConfidence ?? 0.78, 0.0), 1.0)
+        cooldownSeconds = min(max(storedCooldown ?? 1.50, 0.0), 5.0)
+        dwellSeconds = min(max(storedDwell ?? 0.35, 0.0), 3.0)
     }
 
     private static let confidenceThresholdKey = "settings.safety.confidenceThreshold"

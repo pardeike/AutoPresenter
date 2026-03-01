@@ -67,6 +67,7 @@ actor CommandSafetyGate {
                 return GateDecision(accepted: false, reason: "mark_index must be positive", command: normalized)
             }
 
+            // Marks are non-navigation feedback and should feel immediate once validated.
             pendingCandidate = nil
             return GateDecision(accepted: true, reason: "accepted mark", command: normalized)
         }
@@ -92,6 +93,12 @@ actor CommandSafetyGate {
                     command: normalized
                 )
             }
+        }
+
+        if shouldBypassDwellForExplicitNavigationCue(command: normalized) {
+            pendingCandidate = nil
+            lastAcceptedAt = now
+            return GateDecision(accepted: true, reason: "accepted explicit navigation cue", command: normalized)
         }
 
         let dwell = max(0, policy.dwellSeconds)
@@ -135,6 +142,112 @@ actor CommandSafetyGate {
         case .goto, .mark:
             return command
         }
+    }
+
+    private func shouldBypassDwellForExplicitNavigationCue(command: SlideCommand) -> Bool {
+        guard command.action == .next || command.action == .previous else {
+            return false
+        }
+
+        guard let cue = explicitNavigationCue(from: command) else {
+            return false
+        }
+
+        switch command.action {
+        case .next:
+            return isExplicitNextSlideCue(cue)
+        case .previous:
+            return isExplicitPreviousSlideCue(cue)
+        case .goto, .mark, .stay:
+            return false
+        }
+    }
+
+    private func explicitNavigationCue(from command: SlideCommand) -> String? {
+        let sourceText: String?
+        if let excerpt = command.utteranceExcerpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !excerpt.isEmpty {
+            sourceText = excerpt
+        } else {
+            let rationale = command.rationale.trimmingCharacters(in: .whitespacesAndNewlines)
+            sourceText = rationale.isEmpty ? nil : rationale
+        }
+
+        guard let sourceText else {
+            return nil
+        }
+
+        let normalized = sourceText
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        let trimmed = trimPolitenessFromCue(normalized)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func trimPolitenessFromCue(_ text: String) -> String {
+        var output = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = [
+            "please ",
+            "can you ",
+            "could you ",
+            "would you ",
+            "will you "
+        ]
+        let suffixes = [
+            " please",
+            " now",
+            " thanks",
+            " thank you"
+        ]
+
+        var changed = true
+        while changed {
+            changed = false
+            for prefix in prefixes where output.hasPrefix(prefix) {
+                output.removeFirst(prefix.count)
+                output = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                changed = true
+            }
+            for suffix in suffixes where output.hasSuffix(suffix) {
+                output.removeLast(suffix.count)
+                output = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                changed = true
+            }
+        }
+        return output
+    }
+
+    private func isExplicitNextSlideCue(_ cue: String) -> Bool {
+        let cues: Set<String> = [
+            "next slide",
+            "next page",
+            "go next slide",
+            "go to next slide",
+            "go to the next slide",
+            "move to next slide",
+            "move to the next slide",
+            "show next slide",
+            "advance to next slide"
+        ]
+        return cues.contains(cue)
+    }
+
+    private func isExplicitPreviousSlideCue(_ cue: String) -> Bool {
+        let cues: Set<String> = [
+            "previous slide",
+            "prev slide",
+            "previous page",
+            "go to previous slide",
+            "go to the previous slide",
+            "move to previous slide",
+            "move to the previous slide",
+            "show previous slide",
+            "go back one slide"
+        ]
+        return cues.contains(cue)
     }
 
     private func format(_ value: Double) -> String {
