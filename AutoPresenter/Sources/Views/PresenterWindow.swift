@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Combine
 import SwiftUI
 
@@ -10,6 +11,8 @@ struct PresenterWindowState: Sendable {
     let isSessionTransitioning: Bool
     let canToggleSession: Bool
     let deckDirectoryPath: String?
+    let quoteAudioStartDelayMilliseconds: Double
+    let quoteAudioPostPlaybackWaitMilliseconds: Double
 
     static let empty = PresenterWindowState(
         slide: nil,
@@ -18,7 +21,9 @@ struct PresenterWindowState: Sendable {
         sessionPhase: .idle,
         isSessionTransitioning: false,
         canToggleSession: true,
-        deckDirectoryPath: nil
+        deckDirectoryPath: nil,
+        quoteAudioStartDelayMilliseconds: 900,
+        quoteAudioPostPlaybackWaitMilliseconds: 2_000
     )
 }
 
@@ -26,6 +31,7 @@ enum PresenterWindowAction: Sendable {
     case previousSlide
     case nextSlide
     case toggleSession
+    case quoteAudioStarted
     case closed
 }
 
@@ -340,8 +346,8 @@ private struct PresenterRootView: View {
         ZStack {
             LinearGradient(
                 colors: [
-                    Color(red: 0.07, green: 0.07, blue: 0.10),
-                    Color(red: 0.02, green: 0.02, blue: 0.03)
+                    Color(red: 0.09, green: 0.15, blue: 0.22),
+                    Color(red: 0.03, green: 0.07, blue: 0.12)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -353,7 +359,15 @@ private struct PresenterRootView: View {
                     slide: slide,
                     highlightPhrases: state.highlightPhrases,
                     markedSegmentIndices: state.markedSegmentIndices,
-                    deckDirectoryPath: state.deckDirectoryPath
+                    deckDirectoryPath: state.deckDirectoryPath,
+                    quoteAudioStartDelayMilliseconds: state.quoteAudioStartDelayMilliseconds,
+                    quoteAudioPostPlaybackWaitMilliseconds: state.quoteAudioPostPlaybackWaitMilliseconds,
+                    onQuoteAudioStarted: {
+                        stateModel.send(.quoteAudioStarted)
+                    },
+                    onQuoteAudioFinished: {
+                        stateModel.send(.nextSlide)
+                    }
                 )
             } else if !AppBuildFlags.strictFullscreenAudienceMode {
                 VStack(spacing: 16) {
@@ -451,7 +465,25 @@ private struct PresenterSlideView: View {
     let highlightPhrases: [String]
     let markedSegmentIndices: Set<Int>
     let deckDirectoryPath: String?
+    let quoteAudioStartDelayMilliseconds: Double
+    let quoteAudioPostPlaybackWaitMilliseconds: Double
+    let onQuoteAudioStarted: () -> Void
+    let onQuoteAudioFinished: () -> Void
     @State private var imageStageOpacity: Double = 1
+    @StateObject private var quoteAudioPlayer = PresenterQuoteAudioPlayer()
+    @State private var pendingQuoteAutoAdvanceWorkItem: DispatchWorkItem?
+    private let steelDimText = Color(red: 0.58, green: 0.69, blue: 0.80).opacity(0.38)
+    private let steelDimSecondaryText = Color(red: 0.51, green: 0.62, blue: 0.73).opacity(0.30)
+    private let steelBrightText = Color(red: 0.92, green: 0.97, blue: 1.00)
+    private let steelBullet = Color(red: 0.63, green: 0.74, blue: 0.85).opacity(0.48)
+
+    private var quoteAudioStartDelaySeconds: Double {
+        max(quoteAudioStartDelayMilliseconds, 0) / 1_000
+    }
+
+    private var quotePostAudioAdvanceDelaySeconds: Double {
+        max(quoteAudioPostPlaybackWaitMilliseconds, 0) / 1_000
+    }
 
     private var segmentBuckets: SlideSegmentBuckets {
         slide.segmentBuckets()
@@ -462,6 +494,28 @@ private struct PresenterSlideView: View {
             from: slide.imagePlaceholderParagraphs,
             deckDirectoryPath: deckDirectoryPath
         )
+    }
+
+    private var quoteAudioURL: URL? {
+        guard
+            let quoteAudioPath = slide.quoteAudioPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !quoteAudioPath.isEmpty
+        else {
+            return nil
+        }
+
+        let entry = SlideImagePathResolver.resolveEntries(
+            from: [quoteAudioPath],
+            deckDirectoryPath: deckDirectoryPath
+        ).first
+
+        guard let resolvedURL = entry?.resolvedURL else {
+            return nil
+        }
+        guard resolvedURL.pathExtension.lowercased() == "mp3" else {
+            return nil
+        }
+        return resolvedURL
     }
 
     private var normalizedHighlightPhrases: [String] {
@@ -479,19 +533,46 @@ private struct PresenterSlideView: View {
     }
 
     var body: some View {
-        if slide.layout == .image {
-            imageSlideBody
-        } else {
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 34) {
-                    header
-                    contentBody
+        Group {
+            if slide.layout == .image {
+                imageSlideBody
+            } else if slide.layout == .quote {
+                quoteSlideBody
+            } else {
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 34) {
+                        header
+                        contentBody
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 88)
+                    .padding(.vertical, 76)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 88)
-                .padding(.vertical, 76)
             }
         }
+        .onAppear {
+            handleQuoteAudioSlideActivation()
+        }
+        .onChange(of: slide.id) { _, _ in
+            handleQuoteAudioSlideActivation()
+        }
+        .onDisappear {
+            quoteAudioPlayer.stop()
+            cancelPendingQuoteAutoAdvance()
+        }
+    }
+
+    private var quoteSlideBody: some View {
+        ZStack(alignment: .topLeading) {
+            contentBody
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+
+            header
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .padding(.horizontal, 88)
+        .padding(.vertical, 76)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var imageSlideBody: some View {
@@ -513,7 +594,7 @@ private struct PresenterSlideView: View {
                     ForEach(segmentBuckets.caption, id: \.index) { segment in
                         segmentText(segment)
                             .font(.system(size: 30, weight: .regular, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.80))
+                            .foregroundStyle(steelDimSecondaryText)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -532,10 +613,10 @@ private struct PresenterSlideView: View {
             VStack(spacing: 14) {
                 Image(systemName: "photo.on.rectangle.angled")
                     .font(.system(size: 44, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(steelDimText)
                 Text("No images configured")
                     .font(.system(size: 28, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.74))
+                    .foregroundStyle(steelDimText)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if imageEntries.count <= 3 {
@@ -558,7 +639,8 @@ private struct PresenterSlideView: View {
                 ForEach(segmentBuckets.title, id: \.index) { segment in
                     segmentText(segment)
                         .font(.system(size: 68, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(steelDimText)
+                        .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -568,11 +650,14 @@ private struct PresenterSlideView: View {
                     ForEach(segmentBuckets.subtitle, id: \.index) { segment in
                         segmentText(segment)
                             .font(.system(size: 38, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.82))
+                            .foregroundStyle(steelDimSecondaryText)
+                            .multilineTextAlignment(.leading)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -580,11 +665,16 @@ private struct PresenterSlideView: View {
         switch slide.layout {
         case .quote:
             if !segmentBuckets.quote.isEmpty {
-                ForEach(segmentBuckets.quote, id: \.index) { segment in
-                    segmentText(segment)
-                        .font(.system(size: 56, weight: .semibold, design: .serif).italic())
-                        .foregroundStyle(.white)
+                VStack(alignment: .center, spacing: 20) {
+                    ForEach(segmentBuckets.quote, id: \.index) { segment in
+                        segmentText(segment)
+                            .font(.system(size: 56, weight: .semibold, design: .serif).italic())
+                            .foregroundStyle(steelDimText)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .center)
             }
         case .image:
             EmptyView()
@@ -606,17 +696,17 @@ private struct PresenterSlideView: View {
                 if !AppBuildFlags.strictFullscreenAudienceMode {
                     Text("No bullet content")
                         .font(.system(size: 34, weight: .regular, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.65))
+                        .foregroundStyle(steelDimSecondaryText)
                 }
             } else {
                 ForEach(segmentBuckets.bodyBullets, id: \.index) { segment in
                     HStack(alignment: .top, spacing: 12) {
                         Text("•")
                             .font(.system(size: 42, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.92))
+                            .foregroundStyle(steelBullet)
                         segmentText(segment)
                             .font(.system(size: 42, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(steelDimText)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -682,10 +772,10 @@ private struct PresenterSlideView: View {
             VStack(spacing: 10) {
                 Image(systemName: "photo")
                     .font(.system(size: 44, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.76))
+                    .foregroundStyle(steelDimText)
                 Text(entry.displayName)
                     .font(.system(size: 18, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.76))
+                    .foregroundStyle(steelDimText)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .padding(.horizontal, 18)
@@ -705,6 +795,49 @@ private struct PresenterSlideView: View {
         }
     }
 
+    private func handleQuoteAudioSlideActivation() {
+        quoteAudioPlayer.stop()
+        cancelPendingQuoteAutoAdvance()
+
+        guard slide.layout == .quote else {
+            return
+        }
+        let quoteIndices = Set(segmentBuckets.quote.map(\.index))
+        guard !quoteIndices.isEmpty else {
+            return
+        }
+        guard markedSegmentIndices.isDisjoint(with: quoteIndices) else {
+            return
+        }
+        guard let quoteAudioURL else {
+            return
+        }
+
+        quoteAudioPlayer.play(
+            from: quoteAudioURL,
+            delaySeconds: quoteAudioStartDelaySeconds,
+            onPlaybackStarted: onQuoteAudioStarted,
+            onPlaybackFinished: scheduleQuoteAutoAdvance
+        )
+    }
+
+    private func scheduleQuoteAutoAdvance() {
+        cancelPendingQuoteAutoAdvance()
+        let workItem = DispatchWorkItem {
+            onQuoteAudioFinished()
+        }
+        pendingQuoteAutoAdvanceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + quotePostAudioAdvanceDelaySeconds,
+            execute: workItem
+        )
+    }
+
+    private func cancelPendingQuoteAutoAdvance() {
+        pendingQuoteAutoAdvanceWorkItem?.cancel()
+        pendingQuoteAutoAdvanceWorkItem = nil
+    }
+
     @ViewBuilder
     private func presenterColumn(
         titleSegments: [SlideMarkSegment],
@@ -716,13 +849,13 @@ private struct PresenterSlideView: View {
                 if let fallbackTitle {
                     Text(fallbackTitle)
                         .font(.system(size: 42, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(steelDimText)
                 }
             } else {
                 ForEach(titleSegments, id: \.index) { segment in
                     segmentText(segment)
                         .font(.system(size: 42, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(steelDimText)
                 }
             }
 
@@ -730,17 +863,17 @@ private struct PresenterSlideView: View {
                 if !AppBuildFlags.strictFullscreenAudienceMode {
                     Text("No bullet content")
                         .font(.system(size: 34, weight: .regular, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.65))
+                        .foregroundStyle(steelDimSecondaryText)
                 }
             } else {
                 ForEach(bulletSegments, id: \.index) { segment in
                     HStack(alignment: .top, spacing: 12) {
                         Text("•")
                             .font(.system(size: 38, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.92))
+                            .foregroundStyle(steelBullet)
                         segmentText(segment)
                             .font(.system(size: 34, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(steelDimText)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -763,7 +896,7 @@ private struct PresenterSlideView: View {
 
         if isMarkedByIndex {
             let fullRange = attributed.startIndex..<attributed.endIndex
-            attributed[fullRange].foregroundColor = Color(red: 1.0, green: 0.93, blue: 0.35)
+            attributed[fullRange].foregroundColor = steelBrightText
         }
 
         for phrase in normalizedHighlightPhrases {
@@ -778,7 +911,7 @@ private struct PresenterSlideView: View {
                 }
 
                 let highlightedRange = lower..<upper
-                attributed[highlightedRange].foregroundColor = Color(red: 1.0, green: 0.90, blue: 0.30)
+                attributed[highlightedRange].foregroundColor = steelBrightText
             }
         }
 
@@ -810,6 +943,87 @@ private struct PresenterSlideView: View {
         }
 
         return ranges
+    }
+}
+
+@MainActor
+private final class PresenterQuoteAudioPlayer: NSObject, ObservableObject, @preconcurrency AVAudioPlayerDelegate {
+    private var pendingStartWorkItem: DispatchWorkItem?
+    private var audioPlayer: AVAudioPlayer?
+    private var pendingOnPlaybackStarted: (() -> Void)?
+    private var pendingOnPlaybackFinished: (() -> Void)?
+
+    func play(
+        from url: URL,
+        delaySeconds: Double,
+        onPlaybackStarted: @escaping () -> Void,
+        onPlaybackFinished: @escaping () -> Void
+    ) {
+        stop()
+        pendingOnPlaybackStarted = onPlaybackStarted
+        pendingOnPlaybackFinished = onPlaybackFinished
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.startPlayback(from: url)
+        }
+        pendingStartWorkItem = workItem
+        let delay = max(delaySeconds, 0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    func stop() {
+        pendingStartWorkItem?.cancel()
+        pendingStartWorkItem = nil
+        pendingOnPlaybackStarted = nil
+        pendingOnPlaybackFinished = nil
+        audioPlayer?.delegate = nil
+        audioPlayer?.stop()
+        audioPlayer = nil
+    }
+
+    private func startPlayback(from url: URL) {
+        let didStartSecurityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartSecurityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard let audioData = try? Data(contentsOf: url) else {
+            return
+        }
+        guard let player = try? AVAudioPlayer(data: audioData) else {
+            return
+        }
+
+        player.delegate = self
+        player.prepareToPlay()
+        guard player.play() else {
+            return
+        }
+
+        audioPlayer = player
+        pendingOnPlaybackStarted?()
+        pendingOnPlaybackStarted = nil
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        guard player === audioPlayer else {
+            return
+        }
+        audioPlayer = nil
+        guard flag else {
+            pendingOnPlaybackFinished = nil
+            return
+        }
+        pendingOnPlaybackFinished?()
+        pendingOnPlaybackFinished = nil
+    }
+
+    func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        if player === audioPlayer {
+            audioPlayer = nil
+        }
+        pendingOnPlaybackFinished = nil
     }
 }
 

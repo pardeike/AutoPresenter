@@ -311,6 +311,12 @@ private struct LargeSlidePreview: View {
     let markedSegmentIndices: Set<Int>
     let deckDirectoryPath: String?
     private let headerMinHeight: CGFloat = 128
+    private let steelBackTop = Color(red: 0.11, green: 0.16, blue: 0.22)
+    private let steelBackBottom = Color(red: 0.05, green: 0.09, blue: 0.13)
+    private let steelDimText = Color(red: 0.58, green: 0.69, blue: 0.80).opacity(0.42)
+    private let steelDimSecondaryText = Color(red: 0.51, green: 0.62, blue: 0.73).opacity(0.34)
+    private let steelBrightText = Color(red: 0.92, green: 0.97, blue: 1.00)
+    private let steelChrome = Color(red: 0.38, green: 0.50, blue: 0.63).opacity(0.34)
 
     private var segmentBuckets: SlideSegmentBuckets {
         slide.segmentBuckets()
@@ -352,10 +358,10 @@ private struct LargeSlidePreview: View {
 
                     Text(slide.layout.rawValue.uppercased())
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(steelDimText)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(.black.opacity(0.08))
+                        .background(steelChrome)
                         .clipShape(Capsule())
                 }
 
@@ -381,11 +387,17 @@ private struct LargeSlidePreview: View {
         }
         .padding(22)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(.black.opacity(0.04))
+        .background(
+            LinearGradient(
+                colors: [steelBackTop, steelBackBottom],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.black.opacity(0.12), lineWidth: 1)
+                .strokeBorder(steelChrome, lineWidth: 1)
         )
     }
 
@@ -456,7 +468,8 @@ private struct LargeSlidePreview: View {
             segmentIndexBadge(segment)
             Text("•")
                 .font(.title3.weight(.semibold))
-            segmentText(segment)
+                .foregroundStyle(steelDimText)
+            segmentText(segment, secondary: false)
                 .font(.title3)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -465,32 +478,37 @@ private struct LargeSlidePreview: View {
     private func segmentTextRow(_ segment: SlideMarkSegment, font: Font, secondary: Bool = false) -> some View {
         HStack(alignment: .top, spacing: 8) {
             segmentIndexBadge(segment)
-            segmentText(segment)
+            segmentText(segment, secondary: secondary)
                 .font(font)
-                .foregroundStyle(secondary ? .secondary : .primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
+    @ViewBuilder
     private func segmentIndexBadge(_ segment: SlideMarkSegment) -> some View {
-        HStack(spacing: 4) {
-            Text("\(segment.index)")
-                .font(.caption2.weight(.bold))
-            Text(segment.kind)
-                .font(.caption2.weight(.medium))
+        if segment.isTitleKind {
+            EmptyView()
+        } else {
+            HStack(spacing: 4) {
+                Text("\(segment.index)")
+                    .font(.caption2.weight(.bold))
+                Text(segment.kind)
+                    .font(.caption2.weight(.medium))
+            }
+            .foregroundStyle(steelDimSecondaryText)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(steelChrome)
+            .clipShape(Capsule())
         }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(.black.opacity(0.08))
-        .clipShape(Capsule())
     }
 
-    private func segmentText(_ segment: SlideMarkSegment) -> Text {
+    private func segmentText(_ segment: SlideMarkSegment, secondary: Bool) -> Text {
         Text(
             makeHighlightedAttributedString(
                 from: segment.text,
-                isMarkedByIndex: markedSegmentIndices.contains(segment.index)
+                isMarkedByIndex: markedSegmentIndices.contains(segment.index),
+                secondary: secondary
             )
         )
     }
@@ -522,7 +540,7 @@ private struct LargeSlidePreview: View {
     private func imagePreviewCell(_ entry: SlideImagePathEntry) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8)
-                .fill(.black)
+                .fill(steelBackBottom.opacity(0.88))
 
             if let image = SlideImageLoader.shared.image(for: entry) {
                 Image(nsImage: image)
@@ -533,10 +551,10 @@ private struct LargeSlidePreview: View {
                 VStack(spacing: 6) {
                     Image(systemName: "photo")
                         .font(.system(size: 20, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(steelDimText)
                     Text(entry.displayName)
                         .font(.caption2.monospaced())
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(steelDimText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .padding(.horizontal, 8)
@@ -546,17 +564,21 @@ private struct LargeSlidePreview: View {
         .aspectRatio(1, contentMode: .fit)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(.black.opacity(0.28), lineWidth: 1)
+                .strokeBorder(steelChrome, lineWidth: 1)
         )
     }
 
-    private func makeHighlightedAttributedString(from rawText: String, isMarkedByIndex: Bool) -> AttributedString {
+    private func makeHighlightedAttributedString(
+        from rawText: String,
+        isMarkedByIndex: Bool,
+        secondary: Bool
+    ) -> AttributedString {
         var attributed = AttributedString(rawText)
+        let fullRange = attributed.startIndex..<attributed.endIndex
+        attributed[fullRange].foregroundColor = secondary ? steelDimSecondaryText : steelDimText
 
         if isMarkedByIndex {
-            let fullRange = attributed.startIndex..<attributed.endIndex
-            attributed[fullRange].backgroundColor = .yellow.opacity(0.75)
-            attributed[fullRange].foregroundColor = .primary
+            attributed[fullRange].foregroundColor = steelBrightText
         }
 
         for phrase in normalizedHighlightPhrases {
@@ -571,8 +593,7 @@ private struct LargeSlidePreview: View {
                 }
 
                 let highlightedRange = lower..<upper
-                attributed[highlightedRange].backgroundColor = .yellow.opacity(0.6)
-                attributed[highlightedRange].foregroundColor = .primary
+                attributed[highlightedRange].foregroundColor = steelBrightText
             }
         }
 
@@ -637,6 +658,8 @@ private final class AppPresenterWindowBridge: ObservableObject, PresenterWindowB
             viewModel.nextSlide()
         case .toggleSession:
             viewModel.toggleRealtimeSession()
+        case .quoteAudioStarted:
+            viewModel.markQuoteSegmentsFromPresenterAudioStart()
         case .closed:
             break
         }
@@ -650,7 +673,9 @@ private final class AppPresenterWindowBridge: ObservableObject, PresenterWindowB
             sessionPhase: viewModel.sessionPhase,
             isSessionTransitioning: viewModel.isSessionTransitioning,
             canToggleSession: viewModel.canToggleSession,
-            deckDirectoryPath: viewModel.deckDirectoryPathForImages
+            deckDirectoryPath: viewModel.deckDirectoryPathForImages,
+            quoteAudioStartDelayMilliseconds: viewModel.quoteAudioStartDelayMilliseconds,
+            quoteAudioPostPlaybackWaitMilliseconds: viewModel.quoteAudioPostPlaybackWaitMilliseconds
         )
     }
 }
@@ -847,6 +872,16 @@ private struct PresentationEditorRootView: View {
                                     text: $draft.quoteText,
                                     minHeight: 120
                                 )
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("Quote Audio (MP3 Path)")
+                                        .font(.headline)
+                                    Text("Single path (absolute or ./ relative to deck). Plays shortly after entering this quote slide.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    TextField("Optional .mp3 path", text: $draft.quoteAudioPathText)
+                                        .font(.system(.body, design: .monospaced))
+                                        .textFieldStyle(.roundedBorder)
+                                }
                             case .image:
                                 LineTextEditor(
                                     title: "Image Paths",
@@ -1164,6 +1199,7 @@ private struct EditableSlideDraft {
     var subtitleText: String
     var bulletsText: String
     var quoteText: String
+    var quoteAudioPathText: String
     var imageText: String
     var imagePresentationStyle: ImagePresentationStyle
     var imageScrollSpeed: Double
@@ -1179,6 +1215,7 @@ private struct EditableSlideDraft {
         subtitleText: String,
         bulletsText: String,
         quoteText: String,
+        quoteAudioPathText: String,
         imageText: String,
         imagePresentationStyle: ImagePresentationStyle,
         imageScrollSpeed: Double,
@@ -1193,6 +1230,7 @@ private struct EditableSlideDraft {
         self.subtitleText = subtitleText
         self.bulletsText = bulletsText
         self.quoteText = quoteText
+        self.quoteAudioPathText = quoteAudioPathText
         self.imageText = imageText
         self.imagePresentationStyle = imagePresentationStyle
         self.imageScrollSpeed = imageScrollSpeed
@@ -1209,6 +1247,7 @@ private struct EditableSlideDraft {
         subtitleText: "",
         bulletsText: "",
         quoteText: "",
+        quoteAudioPathText: "",
         imageText: "",
         imagePresentationStyle: .scroll,
         imageScrollSpeed: PresentationSlide.defaultImageScrollSpeed,
@@ -1225,6 +1264,7 @@ private struct EditableSlideDraft {
         subtitleText = slide.layout == .image ? "" : slide.subtitleParagraphs.joined(separator: "\n")
         bulletsText = slide.bullets.joined(separator: "\n")
         quoteText = slide.quoteParagraphs.joined(separator: "\n")
+        quoteAudioPathText = slide.quoteAudioPath ?? ""
         imageText = slide.imagePlaceholderParagraphs.joined(separator: "\n")
         imagePresentationStyle = slide.imagePresentationStyle
         imageScrollSpeed = slide.imageScrollSpeed
@@ -1305,6 +1345,7 @@ private struct EditableSlideDraft {
             bullets: bullets,
             quote: quoteParagraphs.joined(separator: " ").nilIfBlank,
             quoteParagraphs: quoteParagraphs,
+            quoteAudioPath: quoteAudioPathText.nilIfBlank,
             imagePlaceholder: imageParagraphs.joined(separator: " ").nilIfBlank,
             imagePlaceholderParagraphs: imageParagraphs,
             imagePresentationStyle: imagePresentationStyle,

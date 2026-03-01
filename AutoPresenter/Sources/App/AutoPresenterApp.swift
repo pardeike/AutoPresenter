@@ -11,7 +11,7 @@ struct AutoPresenterApp: App {
     init() {
         let appSettings = AppSettings()
         _settings = StateObject(wrappedValue: appSettings)
-        _viewModel = StateObject(wrappedValue: AppViewModel(settings: appSettings, bootstrapExampleDeck: false))
+        _viewModel = StateObject(wrappedValue: AppViewModel(settings: appSettings))
 
         NSWindow.allowsAutomaticWindowTabbing = false
         UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
@@ -169,6 +169,8 @@ private final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
 
 }
 
+private let mainWindowIdentifier = NSUserInterfaceItemIdentifier("AutoPresenter.MainWindow")
+
 private struct MainWindowContent: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var hasAttemptedStartupRestore = false
@@ -177,7 +179,8 @@ private struct MainWindowContent: View {
         ContentView(viewModel: viewModel)
             .onAppear {
                 if let activeWindow = NSApp.mainWindow ?? NSApp.keyWindow,
-                   shouldManageMainWindow(activeWindow) {
+                   isMainWindowCandidate(activeWindow) {
+                    markManagedMainWindow(activeWindow)
                     MainWindowFramePersistence.shared.attach(window: activeWindow)
                     updateManagedWindowTitle(activeWindow)
                 }
@@ -198,7 +201,7 @@ private struct MainWindowContent: View {
                 guard let window = notification.object as? NSWindow else {
                     return
                 }
-                guard shouldManageMainWindow(window) else {
+                guard window.identifier == mainWindowIdentifier else {
                     return
                 }
                 MainWindowFramePersistence.shared.attach(window: window)
@@ -218,7 +221,7 @@ private struct MainWindowContent: View {
             }
     }
 
-    private func shouldManageMainWindow(_ window: NSWindow) -> Bool {
+    private func isMainWindowCandidate(_ window: NSWindow) -> Bool {
         if window is NSPanel {
             return false
         }
@@ -231,21 +234,28 @@ private struct MainWindowContent: View {
         return true
     }
 
+    private func markManagedMainWindow(_ window: NSWindow) {
+        if window.identifier != mainWindowIdentifier {
+            window.identifier = mainWindowIdentifier
+        }
+    }
+
     private func updateCurrentManagedWindowTitle() {
-        if let window = NSApp.mainWindow, shouldManageMainWindow(window) {
+        if let window = NSApp.mainWindow, window.identifier == mainWindowIdentifier {
             updateManagedWindowTitle(window)
             return
         }
-        if let window = NSApp.keyWindow, shouldManageMainWindow(window) {
+        if let window = NSApp.keyWindow, window.identifier == mainWindowIdentifier {
             updateManagedWindowTitle(window)
             return
         }
-        if let window = NSApp.windows.first(where: shouldManageMainWindow) {
+        if let window = NSApp.windows.first(where: { $0.identifier == mainWindowIdentifier }) {
             updateManagedWindowTitle(window)
         }
     }
 
     private func updateManagedWindowTitle(_ window: NSWindow) {
+        markManagedMainWindow(window)
         window.title = mainWindowTitle
     }
 
@@ -400,16 +410,7 @@ private final class MainWindowFramePersistence: ObservableObject {
     }
 
     private func shouldManage(_ window: NSWindow) -> Bool {
-        if window is NSPanel {
-            return false
-        }
-        if window.delegate is PresenterWindowManager {
-            return false
-        }
-        if window.delegate is PresentationEditorWindowManager {
-            return false
-        }
-        return true
+        window.identifier == mainWindowIdentifier
     }
 
     private func reapplyRestoredOrigin(_ origin: NSPoint, on window: NSWindow, delay: TimeInterval) {

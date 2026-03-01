@@ -19,10 +19,17 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: AutoPresenter/Sources
-    resources:
       - path: AutoPresenter/Resources
+        buildPhase: resources
+        excludes:
+          - Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ap.autopresenter
         INFOPLIST_FILE: AutoPresenter/Resources/Info.plist
         CODE_SIGN_STYLE: Automatic
+schemes:
+  AutoPresenter:
+    build:
+      targets:
+        AutoPresenter: all

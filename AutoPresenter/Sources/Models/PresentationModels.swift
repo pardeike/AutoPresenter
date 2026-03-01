@@ -131,6 +131,10 @@ struct SlideMarkSegment: Sendable {
     let index: Int
     let kind: String
     let text: String
+
+    var isTitleKind: Bool {
+        kind == "title" || kind.hasSuffix("-title")
+    }
 }
 
 struct SlideSegmentBuckets: Sendable {
@@ -171,6 +175,7 @@ struct PresentationSlide: Identifiable, Sendable {
     let bullets: [String]
     let quote: String?
     let quoteParagraphs: [String]
+    let quoteAudioPath: String?
     let imagePlaceholder: String?
     let imagePlaceholderParagraphs: [String]
     let imagePresentationStyle: ImagePresentationStyle
@@ -219,6 +224,9 @@ struct PresentationSlide: Identifiable, Sendable {
         if let quote, !quote.isEmpty {
             chunks.append("quote=\(quote)")
         }
+        if let quoteAudioPath, !quoteAudioPath.isEmpty {
+            chunks.append("quote_audio=\(quoteAudioPath)")
+        }
         if let imagePlaceholder, !imagePlaceholder.isEmpty {
             chunks.append("image=\(imagePlaceholder)")
         }
@@ -232,23 +240,32 @@ struct PresentationSlide: Identifiable, Sendable {
     }
 
     func markableSegments() -> [SlideMarkSegment] {
-        segmentBuckets().ordered
+        segmentBuckets().ordered.filter { !$0.isTitleKind }
     }
 
     func segmentBuckets() -> SlideSegmentBuckets {
-        var nextIndex = 1
+        var nextMarkIndex = 1
+        var nextTitleIndex = -1
 
         func makeSegments(kind: String, from textParts: [String]) -> [SlideMarkSegment] {
             var segments: [SlideMarkSegment] = []
             for part in textParts.cleanedParagraphs() {
+                let segmentIndex: Int
+                if kind == "title" || kind.hasSuffix("-title") {
+                    segmentIndex = nextTitleIndex
+                    nextTitleIndex -= 1
+                } else {
+                    segmentIndex = nextMarkIndex
+                    nextMarkIndex += 1
+                }
+
                 segments.append(
                     SlideMarkSegment(
-                        index: nextIndex,
+                        index: segmentIndex,
                         kind: kind,
                         text: part
                     )
                 )
-                nextIndex += 1
             }
             return segments
         }
@@ -324,6 +341,7 @@ struct PresentationSlide: Identifiable, Sendable {
             bullets: bullets,
             quote: quote,
             quoteParagraphs: quoteParagraphs,
+            quoteAudioPath: quoteAudioPath,
             imagePlaceholder: imagePlaceholder,
             imagePlaceholderParagraphs: imagePlaceholderParagraphs,
             imagePresentationStyle: imagePresentationStyle,
@@ -420,6 +438,7 @@ private struct WritableSlideFile: Encodable {
     let subtitle: [String]?
     let bullets: [String]?
     let quote: [String]?
+    let quoteAudio: String?
     let imagePlaceholder: [String]?
     let imagePresentationStyle: String?
     let imageScrollSpeed: Double?
@@ -432,6 +451,7 @@ private struct WritableSlideFile: Encodable {
         title = slide.titleParagraphs.cleanedParagraphs()
         subtitle = slide.subtitleParagraphs.cleanedParagraphs().nilIfEmpty
         quote = slide.quoteParagraphs.cleanedParagraphs().nilIfEmpty
+        quoteAudio = slide.quoteAudioPath?.nilIfBlank
         imagePlaceholder = slide.imagePlaceholderParagraphs.cleanedParagraphs().nilIfEmpty
         caption = slide.captionParagraphs.cleanedParagraphs().nilIfEmpty
         left = slide.leftColumn.map(WritableSlideColumnFile.init(column:))
@@ -518,6 +538,7 @@ private struct SimpleSlideFile: Decodable {
             bullets: bulletItems,
             quote: nil,
             quoteParagraphs: [],
+            quoteAudioPath: nil,
             imagePlaceholder: nil,
             imagePlaceholderParagraphs: [],
             imagePresentationStyle: .scroll,
@@ -581,6 +602,7 @@ private struct RichSlideFile: Decodable {
     let subtitle: ParagraphValue?
     let bullets: [String]?
     let quote: ParagraphValue?
+    let quoteAudioPath: String?
     let imagePlaceholder: ParagraphValue?
     let imagePresentationStyle: String?
     let imageScrollSpeed: Double?
@@ -594,6 +616,9 @@ private struct RichSlideFile: Decodable {
         case subtitle
         case bullets
         case quote
+        case quoteAudio = "quote_audio"
+        case legacyQuoteAudio = "quoteAudio"
+        case legacyQuoteAudioPath = "quoteAudioPath"
         case imagePlaceholder = "image_placeholder"
         case legacyImagePlaceholder = "imagePlaceholder"
         case imagePresentationStyle = "image_presentation_style"
@@ -612,6 +637,9 @@ private struct RichSlideFile: Decodable {
         subtitle = try container.decodeIfPresent(ParagraphValue.self, forKey: .subtitle)
         bullets = try container.decodeIfPresent([String].self, forKey: .bullets)
         quote = try container.decodeIfPresent(ParagraphValue.self, forKey: .quote)
+        quoteAudioPath = try container.decodeIfPresent(String.self, forKey: .quoteAudio)
+            ?? container.decodeIfPresent(String.self, forKey: .legacyQuoteAudio)
+            ?? container.decodeIfPresent(String.self, forKey: .legacyQuoteAudioPath)
         imagePlaceholder = try container.decodeIfPresent(ParagraphValue.self, forKey: .imagePlaceholder)
             ?? container.decodeIfPresent(ParagraphValue.self, forKey: .legacyImagePlaceholder)
         imagePresentationStyle = try container.decodeIfPresent(String.self, forKey: .imagePresentationStyle)
@@ -635,6 +663,7 @@ private struct RichSlideFile: Decodable {
         let resolvedSubtitleParagraphs = resolvedLayout == .image ? [] : subtitleParagraphs
         let bulletItems = (bullets ?? []).cleanedParagraphs()
         let quoteParagraphs = (quote?.paragraphs ?? []).cleanedParagraphs()
+        let resolvedQuoteAudioPath = quoteAudioPath?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         let imageParagraphs = (imagePlaceholder?.paragraphs ?? []).cleanedParagraphs()
         let captionParagraphs = (caption?.paragraphs ?? []).cleanedParagraphs()
         let resolvedImagePresentationStyle = ImagePresentationStyle(
@@ -670,6 +699,7 @@ private struct RichSlideFile: Decodable {
             bullets: mergedBullets,
             quote: quoteParagraphs.joined(separator: " ").nilIfBlank,
             quoteParagraphs: quoteParagraphs,
+            quoteAudioPath: resolvedQuoteAudioPath,
             imagePlaceholder: imageParagraphs.joined(separator: " ").nilIfBlank,
             imagePlaceholderParagraphs: imageParagraphs,
             imagePresentationStyle: resolvedImagePresentationStyle,

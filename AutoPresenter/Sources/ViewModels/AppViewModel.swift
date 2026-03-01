@@ -99,12 +99,15 @@ final class AppViewModel: ObservableObject {
     private let maxLogEntries = 600
     private let maxActivityEntries = 300
     private let maxCommandsPerTurn = 6
+    private let preNavigationVisibilityHoldSeconds: Double = 1.0
     private let logFileURL = AppViewModel.resolveLogFileURL()
     @Published private var logEntries: [String] = []
     @Published private var activityEntries: [ActivityFeedEntry] = []
     private var realtimeActivityToken: NSObjectProtocol?
     private var commandProcessingTask: Task<Void, Never>?
+    private var settingsChangeToken: AnyCancellable?
     private var didReportLogFileError = false
+    private var lastNewMarkEvent: (slideIndex: Int, at: Date)?
 
     private let jsonDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -112,18 +115,18 @@ final class AppViewModel: ObservableObject {
         return decoder
     }()
 
-    init(settings: AppSettings, bootstrapExampleDeck: Bool = true) {
+    init(settings: AppSettings) {
         self.settings = settings
         bridge = RealtimeWebBridge()
         bridge.onMessage = { [weak self] payload in
             self?.handleBridgePayload(payload)
         }
+        settingsChangeToken = settings.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         webViewHost.attach(bridge.webView)
         prepareLogFileIfNeeded()
         loadAPIKeyFromKnownLocations()
-        if bootstrapExampleDeck {
-            bootstrapDeckPath()
-        }
         if let logFileURL {
             appendLog("Mirroring command log to \(logFileURL.path)")
         }
@@ -190,7 +193,27 @@ final class AppViewModel: ObservableObject {
     }
 
     var currentSlideMarkedSegmentIndices: Set<Int> {
-        markedSegmentIndicesBySlide[currentSlideIndex] ?? []
+        let explicitMarks = markedSegmentIndicesBySlide[currentSlideIndex] ?? []
+        guard let currentSlide = deck?.slide(at: currentSlideIndex) else {
+            return explicitMarks
+        }
+
+        let autoMarkedTitleIndices = Set(
+            currentSlide
+                .segmentBuckets()
+                .ordered
+                .filter(\.isTitleKind)
+                .map(\.index)
+        )
+        return explicitMarks.union(autoMarkedTitleIndices)
+    }
+
+    var quoteAudioStartDelayMilliseconds: Double {
+        settings.quoteAudioStartDelayMilliseconds
+    }
+
+    var quoteAudioPostPlaybackWaitMilliseconds: Double {
+        settings.quoteAudioPostPlaybackWaitMilliseconds
     }
 
     func chooseDeckFile() {
@@ -411,6 +434,33 @@ final class AppViewModel: ObservableObject {
         }
         pushContextUpdate(reason: "manual refresh")
         appendActivity("Context refreshed", detail: "Current slide instructions sent")
+    }
+
+    func markQuoteSegmentsFromPresenterAudioStart() {
+        guard let slide = deck?.slide(at: currentSlideIndex) else {
+            return
+        }
+
+        let quoteIndices = slide.segmentBuckets().quote.map(\.index)
+        guard !quoteIndices.isEmpty else {
+            return
+        }
+
+        var marked = markedSegmentIndicesBySlide[currentSlideIndex] ?? []
+        let initialCount = marked.count
+        for index in quoteIndices {
+            marked.insert(index)
+        }
+
+        guard marked.count != initialCount else {
+            return
+        }
+
+        markedSegmentIndicesBySlide[currentSlideIndex] = marked
+        lastNewMarkEvent = (slideIndex: currentSlideIndex, at: Date())
+        statusLine = "Quote audio started on slide \(currentSlideIndex)"
+        appendLog("[PRESENTER] quote audio started: marked \(quoteIndices.count) quote segment(s) on slide \(currentSlideIndex)")
+        appendActivity("Quote marked from audio", detail: "Slide \(currentSlideIndex)")
     }
 
     func clearLog() {
@@ -997,8 +1047,8 @@ final class AppViewModel: ObservableObject {
                 appendActivity("AI requested next", detail: "Already on last slide")
                 return
             }
-            guard await waitForHighlightVisibilityIfNeeded(
-                shouldWait: didApplyHighlights,
+            guard await waitForPreNavigationVisibilityIfNeeded(
+                shouldWaitForHighlights: didApplyHighlights,
                 source: source,
                 fromSlideIndex: previousIndex
             ) else {
@@ -1018,8 +1068,8 @@ final class AppViewModel: ObservableObject {
                 appendActivity("AI requested previous", detail: "Already on first slide")
                 return
             }
-            guard await waitForHighlightVisibilityIfNeeded(
-                shouldWait: didApplyHighlights,
+            guard await waitForPreNavigationVisibilityIfNeeded(
+                shouldWaitForHighlights: didApplyHighlights,
                 source: source,
                 fromSlideIndex: previousIndex
             ) else {
@@ -1050,8 +1100,8 @@ final class AppViewModel: ObservableObject {
                 appendActivity("AI requested slide \(targetSlide)", detail: "Already on that slide")
                 return
             }
-            guard await waitForHighlightVisibilityIfNeeded(
-                shouldWait: didApplyHighlights,
+            guard await waitForPreNavigationVisibilityIfNeeded(
+                shouldWaitForHighlights: didApplyHighlights,
                 source: source,
                 fromSlideIndex: previousIndex
             ) else {
@@ -1089,6 +1139,9 @@ final class AppViewModel: ObservableObject {
             var markedIndices = markedSegmentIndicesBySlide[slideIndex] ?? []
             let isNewMark = markedIndices.insert(markIndex).inserted
             markedSegmentIndicesBySlide[slideIndex] = markedIndices
+            if isNewMark {
+                lastNewMarkEvent = (slideIndex: slideIndex, at: Date())
+            }
             statusLine = "Marked segment \(markIndex) on slide \(slideIndex)"
             if isNewMark {
                 appendLog("[APPLIED][\(source)] marked segment \(markIndex) on slide \(slideIndex)")
@@ -1110,18 +1163,12 @@ final class AppViewModel: ObservableObject {
                 }
                 let nextIndex = deck.clampedSlideIndex(slideIndex + 1)
                 if nextIndex != slideIndex {
-                    let shouldDelayAdvance =
-                        markedLastSegment
-                        && (
-                            (command.highlightPhrases?.isEmpty == false)
-                            || (command.utteranceExcerpt?.isEmpty == false)
-                        )
-                    if shouldDelayAdvance {
-                        try? await Task.sleep(for: .seconds(1))
-                        guard currentSlideIndex == slideIndex else {
-                            appendLog("[AUTO][\(source)] auto-advance canceled: slide changed during highlight hold")
-                            return
-                        }
+                    guard await waitForPreNavigationVisibilityIfNeeded(
+                        shouldWaitForHighlights: didApplyHighlights,
+                        source: source,
+                        fromSlideIndex: slideIndex
+                    ) else {
+                        return
                     }
                     currentSlideIndex = nextIndex
                     statusLine = "All segments marked on slide \(slideIndex): auto-advanced to \(nextIndex)"
@@ -1238,6 +1285,52 @@ final class AppViewModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func waitForPreNavigationVisibilityIfNeeded(
+        shouldWaitForHighlights: Bool,
+        source: String,
+        fromSlideIndex: Int
+    ) async -> Bool {
+        let highlightHold = shouldWaitForHighlights ? preNavigationVisibilityHoldSeconds : 0
+        let markHold = remainingMarkVisibilityHoldSeconds(forSlideIndex: fromSlideIndex)
+        let totalHold = max(highlightHold, markHold)
+
+        guard totalHold > 0 else {
+            return true
+        }
+
+        if markHold > 0 {
+            appendLog(
+                "[NAV][\(source)] delaying navigation \(formatLogNumber(totalHold))s for mark/highlight visibility"
+            )
+        } else {
+            appendLog(
+                "[NAV][\(source)] delaying navigation \(formatLogNumber(totalHold))s for highlight visibility"
+            )
+        }
+
+        try? await Task.sleep(for: .seconds(totalHold))
+        guard !Task.isCancelled else {
+            appendLog("[NAV][\(source)] delayed navigation canceled: command task canceled")
+            return false
+        }
+        guard currentSlideIndex == fromSlideIndex else {
+            appendLog("[NAV][\(source)] delayed navigation canceled: slide changed during visibility hold")
+            return false
+        }
+        return true
+    }
+
+    private func remainingMarkVisibilityHoldSeconds(forSlideIndex slideIndex: Int) -> Double {
+        guard let lastNewMarkEvent else {
+            return 0
+        }
+        guard lastNewMarkEvent.slideIndex == slideIndex else {
+            return 0
+        }
+        let elapsed = Date().timeIntervalSince(lastNewMarkEvent.at)
+        return max(0, preNavigationVisibilityHoldSeconds - elapsed)
     }
 
     private func sanitizeHighlightPhrases(_ phrases: [String]) -> [String] {
@@ -1812,38 +1905,6 @@ final class AppViewModel: ObservableObject {
         return event.keyCode == 123 || event.keyCode == 124
     }
 
-    private func bootstrapDeckPath() {
-        let normalizedMeetupDeck = URL(fileURLWithPath: "/Users/ap/Desktop/Meetup136.json")
-        if FileManager.default.fileExists(atPath: normalizedMeetupDeck.path) {
-            deckFilePath = normalizedMeetupDeck.path
-            loadDeckFromPath()
-            appendLog("Loaded normalized Meetup deck from Desktop")
-            return
-        }
-
-        let externalExample = URL(fileURLWithPath: "/Users/ap/Projects/MeTube/documentation/presentation.json")
-        if FileManager.default.fileExists(atPath: externalExample.path) {
-            deckFilePath = externalExample.path
-            loadDeckFromPath()
-            appendLog("Loaded example deck from MeTube documentation")
-            return
-        }
-
-        let workspaceSample = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("presentation.sample.json")
-
-        if FileManager.default.fileExists(atPath: workspaceSample.path) {
-            deckFilePath = workspaceSample.path
-            loadDeckFromPath()
-            return
-        }
-
-        if let bundledSample = Bundle.main.url(forResource: "presentation.sample", withExtension: "json") {
-            deckFilePath = bundledSample.path
-            loadDeckFromPath()
-        }
-    }
-
     private func loadAPIKeyFromKnownLocations() {
         if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             appendLog("Using OPENAI_API_KEY from environment")
@@ -2208,6 +2269,7 @@ final class AppViewModel: ObservableObject {
             bullets: ["Add bullet text"],
             quote: nil,
             quoteParagraphs: [],
+            quoteAudioPath: nil,
             imagePlaceholder: nil,
             imagePlaceholderParagraphs: [],
             imagePresentationStyle: .scroll,
