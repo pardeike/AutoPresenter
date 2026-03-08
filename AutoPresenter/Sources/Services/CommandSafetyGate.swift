@@ -4,6 +4,7 @@ struct CommandPolicy: Sendable {
     var confidenceThreshold: Double
     var cooldownSeconds: Double
     var dwellSeconds: Double
+    var markCooldownSeconds: Double
 }
 
 struct GateDecision: Sendable {
@@ -23,10 +24,12 @@ actor CommandSafetyGate {
 
     private var pendingCandidate: PendingCandidate?
     private var lastAcceptedAt: Date?
+    private var lastAcceptedMarkAt: Date?
 
     func reset() {
         pendingCandidate = nil
         lastAcceptedAt = nil
+        lastAcceptedMarkAt = nil
     }
 
     func evaluate(
@@ -43,7 +46,10 @@ actor CommandSafetyGate {
         }
 
         let threshold = min(max(policy.confidenceThreshold, 0), 1)
-        if normalized.confidence < threshold {
+        // Avoid rejecting commands that are effectively at threshold but differ by
+        // floating-point representation noise (for example 0.94999999 vs 0.95).
+        let thresholdEpsilon = 1e-6
+        if normalized.confidence + thresholdEpsilon < threshold {
             pendingCandidate = nil
             return GateDecision(
                 accepted: false,
@@ -67,7 +73,21 @@ actor CommandSafetyGate {
                 return GateDecision(accepted: false, reason: "mark_index must be positive", command: normalized)
             }
 
+            let markCooldown = max(0, policy.markCooldownSeconds)
+            if markCooldown > 0, let lastAcceptedMarkAt {
+                let elapsed = now.timeIntervalSince(lastAcceptedMarkAt)
+                if elapsed < markCooldown {
+                    pendingCandidate = nil
+                    return GateDecision(
+                        accepted: false,
+                        reason: "mark cooldown active (\(format(markCooldown - elapsed))s remaining)",
+                        command: normalized
+                    )
+                }
+            }
+
             pendingCandidate = nil
+            lastAcceptedMarkAt = now
             return GateDecision(accepted: true, reason: "accepted mark", command: normalized)
         }
 

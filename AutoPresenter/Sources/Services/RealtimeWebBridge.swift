@@ -49,34 +49,53 @@ final class RealtimeWebBridge: NSObject {
         loadBridgePage()
     }
 
-    func startSession(clientSecret: String, model: String, instructions: String) async throws {
+    func startSession(
+        clientSecret: String,
+        model: String,
+        instructions: String,
+        manualCommitIntervalMilliseconds: Int,
+        maxOutputTokens: Int
+    ) async throws {
         try await waitForBridgeReady()
         let payload = StartSessionPayload(
             clientSecret: clientSecret,
             model: model,
             instructions: instructions,
-            turnDetection: .init(
-                type: "server_vad",
-                createResponse: true,
-                interruptResponse: true,
-                silenceDurationMilliseconds: 180
-            )
+            manualCommitIntervalMilliseconds: manualCommitIntervalMilliseconds,
+            maxOutputTokens: maxOutputTokens
         )
         try await invokeJavaScript(functionName: "window.AutoPresenter.startSession", payload: payload)
     }
 
-    func updateInstructions(_ instructions: String) async throws {
+    func updateInstructions(
+        _ instructions: String,
+        manualCommitIntervalMilliseconds: Int,
+        maxOutputTokens: Int
+    ) async throws {
         try await waitForBridgeReady()
-        let payload = UpdateSessionPayload(instructions: instructions)
+        let payload = UpdateSessionPayload(
+            instructions: instructions,
+            manualCommitIntervalMilliseconds: manualCommitIntervalMilliseconds,
+            maxOutputTokens: maxOutputTokens
+        )
         try await invokeJavaScript(functionName: "window.AutoPresenter.updateSession", payload: payload)
     }
 
     func stopSession() async throws {
         try await waitForBridgeReady()
         let script = """
-        (async () => {
+        (() => {
           try {
-            await window.AutoPresenter.stopSession();
+            const stopResult = window.AutoPresenter.stopSession();
+            if (stopResult && typeof stopResult.then === "function") {
+              stopResult.catch((error) => {
+                window.webkit?.messageHandlers?.\(messageHandlerName)?.postMessage({
+                  kind: "log",
+                  level: "error",
+                  message: "window.AutoPresenter.stopSession failed: " + (error?.message ?? String(error))
+                });
+              });
+            }
             return "ok";
           } catch (error) {
             window.webkit?.messageHandlers?.\(messageHandlerName)?.postMessage({
@@ -84,7 +103,7 @@ final class RealtimeWebBridge: NSObject {
               level: "error",
               message: "window.AutoPresenter.stopSession failed: " + (error?.message ?? String(error))
             });
-            throw error;
+            return "error";
           }
         })();
         """
@@ -343,24 +362,27 @@ private struct StartSessionPayload: Encodable {
     let clientSecret: String
     let model: String
     let instructions: String
-    let turnDetection: TurnDetectionConfig
+    let manualCommitIntervalMilliseconds: Int
+    let maxOutputTokens: Int
+
+    enum CodingKeys: String, CodingKey {
+        case clientSecret = "clientSecret"
+        case model
+        case instructions
+        case manualCommitIntervalMilliseconds = "manualCommitIntervalMs"
+        case maxOutputTokens = "maxOutputTokens"
+    }
 }
 
 private struct UpdateSessionPayload: Encodable {
     let instructions: String
-}
-
-private struct TurnDetectionConfig: Encodable {
-    let type: String
-    let createResponse: Bool
-    let interruptResponse: Bool
-    let silenceDurationMilliseconds: Int
+    let manualCommitIntervalMilliseconds: Int
+    let maxOutputTokens: Int
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case createResponse = "create_response"
-        case interruptResponse = "interrupt_response"
-        case silenceDurationMilliseconds = "silence_duration_ms"
+        case instructions
+        case manualCommitIntervalMilliseconds = "manualCommitIntervalMs"
+        case maxOutputTokens = "maxOutputTokens"
     }
 }
 

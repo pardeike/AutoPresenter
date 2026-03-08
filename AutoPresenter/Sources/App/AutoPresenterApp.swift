@@ -70,6 +70,14 @@ struct AutoPresenterApp: App {
                 .disabled(!viewModel.canToggleSession || (viewModel.deck == nil && !viewModel.isRecordingControlActive))
                 Divider()
             }
+
+            CommandGroup(after: .toolbar) {
+                Divider()
+                Button("Restart Presentation") {
+                    viewModel.restartPresentation()
+                }
+                .disabled(viewModel.deck == nil)
+            }
         }
 
         Settings {

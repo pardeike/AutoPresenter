@@ -128,6 +128,11 @@ Safety gate validates:
 - cooldown and dwell windows
 - navigation target validity
 
+Realtime timing is configurable in app Settings:
+- `Commit Interval (ms)` controls how often client-side audio chunks are committed in manual mode
+- `Max Output Tokens` limits model response size for faster function-call completion
+- `Mark Cooldown (ms)` enforces a minimum delay between accepted mark actions
+
 ## Keyboard Shortcuts
 
 - `Cmd+O` Open deck

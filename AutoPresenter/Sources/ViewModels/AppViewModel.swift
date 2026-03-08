@@ -106,8 +106,11 @@ final class AppViewModel: ObservableObject {
     private var realtimeActivityToken: NSObjectProtocol?
     private var commandProcessingTask: Task<Void, Never>?
     private var settingsChangeToken: AnyCancellable?
+    private var realtimeTimingChangeToken: AnyCancellable?
     private var didReportLogFileError = false
     private var lastNewMarkEvent: (slideIndex: Int, at: Date)?
+    private var functionCallArgumentsBufferByID: [String: String] = [:]
+    private var lastParsedSignatureByFunctionCallID: [String: String] = [:]
 
     private let jsonDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -123,6 +126,15 @@ final class AppViewModel: ObservableObject {
         }
         settingsChangeToken = settings.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
+        }
+        realtimeTimingChangeToken = Publishers.CombineLatest(
+            settings.$realtimeSilenceDurationMilliseconds.removeDuplicates(),
+            settings.$realtimeMaxOutputTokens.removeDuplicates()
+        )
+        .dropFirst()
+        .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
+        .sink { [weak self] _, _ in
+            self?.applyRealtimeTimingUpdateIfNeeded()
         }
         webViewHost.attach(bridge.webView)
         prepareLogFileIfNeeded()
@@ -426,6 +438,28 @@ final class AppViewModel: ObservableObject {
         pushContextUpdate(reason: "manual next", shouldLogResult: !suppressLoggingForArrowKey)
     }
 
+    func restartPresentation() {
+        guard let deck else { return }
+
+        markedSegmentIndicesBySlide.removeAll(keepingCapacity: true)
+        lastNewMarkEvent = nil
+
+        let firstSlideIndex = deck.firstSlideIndex
+        let movedToFirstSlide = currentSlideIndex != firstSlideIndex
+        currentSlideIndex = firstSlideIndex
+
+        statusLine = "Presentation restarted on slide \(firstSlideIndex)"
+        appendLog("Presentation restarted: cleared all marked items and moved to slide \(firstSlideIndex)")
+        appendActivity("Presentation restarted", detail: "Cleared marks and returned to slide \(firstSlideIndex)")
+
+        Task {
+            await safetyGate.reset()
+        }
+
+        let reason = movedToFirstSlide ? "manual restart to first slide" : "manual restart cleared marks"
+        pushContextUpdate(reason: reason)
+    }
+
     func applyContextUpdate() {
         guard isSessionActive else {
             appendActivity("Context refresh skipped", detail: "Stream is not active", level: .warning)
@@ -521,12 +555,23 @@ final class AppViewModel: ObservableObject {
         do {
             let clientSecret = try await tokenService.mintClientSecret(apiKey: trimmedKey, model: model)
             let instructions = deck.instructionBlock(currentSlideIndex: currentSlideIndex)
-            try await bridge.startSession(clientSecret: clientSecret, model: model, instructions: instructions)
+            let manualCommitIntervalMilliseconds = Int(settings.realtimeSilenceDurationMilliseconds.rounded())
+            let maxOutputTokens = Int(settings.realtimeMaxOutputTokens.rounded())
+            try await bridge.startSession(
+                clientSecret: clientSecret,
+                model: model,
+                instructions: instructions,
+                manualCommitIntervalMilliseconds: manualCommitIntervalMilliseconds,
+                maxOutputTokens: maxOutputTokens
+            )
             isSessionActive = true
             connectionState = "connecting"
             sessionPhase = .connecting
             statusLine = "Connecting to Realtime..."
             appendLog("Realtime start request sent")
+            appendLog(
+                "Realtime timing: commit_interval_ms=\(manualCommitIntervalMilliseconds), max_output_tokens=\(maxOutputTokens)"
+            )
             appendActivity("Stream start requested", detail: "Connecting to Realtime")
         } catch {
             endRealtimeActivityIfNeeded()
@@ -558,6 +603,8 @@ final class AppViewModel: ObservableObject {
         statusLine = "Stream stopped"
         commandProcessingTask?.cancel()
         commandProcessingTask = nil
+        functionCallArgumentsBufferByID.removeAll(keepingCapacity: true)
+        lastParsedSignatureByFunctionCallID.removeAll(keepingCapacity: true)
         await safetyGate.reset()
         endRealtimeActivityIfNeeded()
         appendLog("Realtime stream stopped")
@@ -635,6 +682,8 @@ final class AppViewModel: ObservableObject {
             isSessionActive = false
             isSpeechDetected = false
             sessionPhase = .stopped
+            functionCallArgumentsBufferByID.removeAll(keepingCapacity: true)
+            lastParsedSignatureByFunctionCallID.removeAll(keepingCapacity: true)
             endRealtimeActivityIfNeeded()
             if previousState != "closed" {
                 appendActivity("Realtime disconnected")
@@ -644,6 +693,8 @@ final class AppViewModel: ObservableObject {
             isSessionActive = false
             isSpeechDetected = false
             sessionPhase = .error
+            functionCallArgumentsBufferByID.removeAll(keepingCapacity: true)
+            lastParsedSignatureByFunctionCallID.removeAll(keepingCapacity: true)
             endRealtimeActivityIfNeeded()
             if previousState != "failed" {
                 appendActivity("Realtime connection failed", level: .error)
@@ -663,6 +714,45 @@ final class AppViewModel: ObservableObject {
         }
 
         switch type {
+        case "response.function_call_arguments.delta":
+            guard let delta = event["delta"] as? String, !delta.isEmpty else {
+                return
+            }
+            let functionCallID = functionCallIdentifier(from: event)
+            if let functionCallID {
+                var accumulated = functionCallArgumentsBufferByID[functionCallID] ?? ""
+                accumulated.append(delta)
+                functionCallArgumentsBufferByID[functionCallID] = accumulated
+                handleCommand(
+                    argumentsJSON: accumulated,
+                    source: "\(type)#\(functionCallID)",
+                    dedupeKey: functionCallID,
+                    isPartial: true
+                )
+            } else {
+                handleCommand(argumentsJSON: delta, source: type, isPartial: true)
+            }
+        case "response.function_call_arguments.done":
+            let functionCallID = functionCallIdentifier(from: event)
+            let finalArguments: String
+            if let arguments = event["arguments"] as? String, !arguments.isEmpty {
+                finalArguments = arguments
+            } else if let functionCallID,
+                      let buffered = functionCallArgumentsBufferByID[functionCallID],
+                      !buffered.isEmpty {
+                finalArguments = buffered
+            } else {
+                return
+            }
+
+            if let functionCallID {
+                functionCallArgumentsBufferByID.removeValue(forKey: functionCallID)
+            }
+            handleCommand(
+                argumentsJSON: finalArguments,
+                source: functionCallID.map { "\(type)#\($0)" } ?? type,
+                dedupeKey: functionCallID
+            )
         case "response.output_item.done":
             guard
                 let item = event["item"] as? [String: Any],
@@ -672,7 +762,22 @@ final class AppViewModel: ObservableObject {
             else {
                 return
             }
-            handleCommand(argumentsJSON: arguments, source: type)
+            let functionCallID = (item["call_id"] as? String)
+                ?? (item["id"] as? String)
+                ?? functionCallIdentifier(from: event)
+            if let functionCallID {
+                functionCallArgumentsBufferByID.removeValue(forKey: functionCallID)
+            }
+            handleCommand(argumentsJSON: arguments, source: type, dedupeKey: functionCallID)
+        case "response.done":
+            functionCallArgumentsBufferByID.removeAll(keepingCapacity: true)
+            lastParsedSignatureByFunctionCallID.removeAll(keepingCapacity: true)
+            if isSessionActive, !isSpeechDetected {
+                sessionPhase = .listening
+                if statusLine == "Processing speech" || statusLine == "Speaking" {
+                    statusLine = "Listening"
+                }
+            }
         case "error":
             let pretty = prettyJSONString(from: event) ?? "<unserializable error payload>"
             appendLog("Realtime error event: \(pretty)")
@@ -698,9 +803,67 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func handleCommand(argumentsJSON: String, source: String) {
-        guard let payload = parseCommandPayload(argumentsJSON: argumentsJSON, source: source) else {
+    private func functionCallIdentifier(from event: [String: Any]) -> String? {
+        if let callID = event["call_id"] as? String, !callID.isEmpty {
+            return callID
+        }
+        if let itemID = event["item_id"] as? String, !itemID.isEmpty {
+            return itemID
+        }
+        if let responseID = event["response_id"] as? String, !responseID.isEmpty {
+            return responseID
+        }
+        if let item = event["item"] as? [String: Any] {
+            if let callID = item["call_id"] as? String, !callID.isEmpty {
+                return callID
+            }
+            if let itemID = item["id"] as? String, !itemID.isEmpty {
+                return itemID
+            }
+        }
+        return nil
+    }
+
+    private func commandPayloadSignature(_ commands: [SlideCommand]) -> String {
+        commands
+            .map { command in
+                "\(command.action.rawValue):\(command.targetSlide ?? -1):\(command.markIndex ?? -1)"
+            }
+            .joined(separator: "|")
+    }
+
+    private func handleCommand(
+        argumentsJSON: String,
+        source: String,
+        dedupeKey: String? = nil,
+        isPartial: Bool = false
+    ) {
+        // Never execute partial streamed payloads. Wait for completed function-call arguments
+        // to avoid premature marks/navigation from incomplete JSON fragments.
+        if isPartial {
             return
+        }
+
+        guard let payload = parseCommandPayload(argumentsJSON: argumentsJSON, source: source, isPartial: isPartial) else {
+            return
+        }
+
+        let commandsToEvaluate = payload.commands
+
+        if let dedupeKey {
+            let signature = commandPayloadSignature(commandsToEvaluate)
+            if signature == "mark:-1:-1",
+               let previousSignature = lastParsedSignatureByFunctionCallID[dedupeKey],
+               previousSignature.hasPrefix("mark:-1:"),
+               previousSignature != signature {
+                // Ignore degraded duplicate payloads for the same function call when
+                // a stronger mark payload was already processed.
+                return
+            }
+            if lastParsedSignatureByFunctionCallID[dedupeKey] == signature {
+                return
+            }
+            lastParsedSignatureByFunctionCallID[dedupeKey] = signature
         }
 
         for note in payload.normalizationNotes {
@@ -713,20 +876,25 @@ final class AppViewModel: ObservableObject {
         if payload.format == .legacySingle {
             appendLog("[PARSE][\(source)] accepted legacy single-command payload")
         }
-        if payload.commands.count > 1 {
-            appendLog("[TURN][\(source)] executing \(payload.commands.count) commands")
+        if commandsToEvaluate.count > 1 {
+            appendLog("[TURN][\(source)] executing \(commandsToEvaluate.count) commands")
         }
 
         let priorTask = commandProcessingTask
         commandProcessingTask = Task { @MainActor in
             await priorTask?.value
-            for (offset, command) in payload.commands.enumerated() {
+            for (offset, command) in commandsToEvaluate.enumerated() {
                 guard !Task.isCancelled else { return }
-                let commandSource = payload.commands.count > 1
-                    ? "\(source)#\(offset + 1)/\(payload.commands.count)"
+                let commandSource = commandsToEvaluate.count > 1
+                    ? "\(source)#\(offset + 1)/\(commandsToEvaluate.count)"
                     : source
-                let allowsAutoAdvance = (offset == payload.commands.count - 1)
-                await evaluateCommand(command, source: commandSource, allowsAutoAdvance: allowsAutoAdvance)
+                let allowsAutoAdvance = (offset == commandsToEvaluate.count - 1)
+                await evaluateCommand(
+                    command,
+                    source: commandSource,
+                    allowsAutoAdvance: allowsAutoAdvance,
+                    isPartial: isPartial
+                )
             }
         }
     }
@@ -750,9 +918,11 @@ final class AppViewModel: ObservableObject {
         let hasOpenString: Bool
     }
 
-    private func parseCommandPayload(argumentsJSON: String, source: String) -> ParsedCommandPayload? {
+    private func parseCommandPayload(argumentsJSON: String, source: String, isPartial: Bool = false) -> ParsedCommandPayload? {
         guard let jsonData = argumentsJSON.data(using: .utf8) else {
-            appendLog("Command decode failed: invalid UTF-8")
+            if !isPartial {
+                appendLog("Command decode failed: invalid UTF-8")
+            }
             return nil
         }
 
@@ -776,8 +946,10 @@ final class AppViewModel: ObservableObject {
             )
         }
 
-        appendLog("Command decode failed: payload did not match command schema")
-        appendLog("Raw command payload [\(source)]: \(argumentsJSON)")
+        if !isPartial {
+            appendLog("Command decode failed: payload did not match command schema")
+            appendLog("Raw command payload [\(source)]: \(argumentsJSON)")
+        }
         return nil
     }
 
@@ -862,15 +1034,17 @@ final class AppViewModel: ObservableObject {
     }
 
     private func recoverCommandsFromPossiblyTruncatedJSON(_ rawJSON: String) -> (commands: [SlideCommand], format: CommandPayloadFormat)? {
-        guard let candidate = repairedJSONCandidate(from: rawJSON) else {
-            return nil
+        if let candidate = repairedJSONCandidate(from: rawJSON),
+           let data = candidate.data(using: .utf8),
+           let decoded = decodeCommandPayload(from: data) {
+            return decoded
         }
 
-        guard let data = candidate.data(using: .utf8) else {
-            return nil
+        if let recoveredSingle = recoverCommandFromPartialJSON(rawJSON) {
+            return ([recoveredSingle], .legacySingle)
         }
 
-        return decodeCommandPayload(from: data)
+        return nil
     }
 
     private func repairedJSONCandidate(from rawJSON: String) -> String? {
@@ -960,7 +1134,122 @@ final class AppViewModel: ObservableObject {
         )
     }
 
-    private func evaluateCommand(_ command: SlideCommand, source: String, allowsAutoAdvance: Bool) async {
+    private func recoverCommandFromPartialJSON(_ rawJSON: String) -> SlideCommand? {
+        guard
+            let actionRaw = extractFirstRegexCapture(
+                pattern: #""action"\s*:\s*"(next|previous|goto|mark|stay)""#,
+                in: rawJSON
+            ),
+            let action = SlideAction(rawValue: actionRaw)
+        else {
+            return nil
+        }
+
+        let targetSlide = extractOptionalIntegerValue(forKey: "target_slide", in: rawJSON)
+        let markIndex = extractOptionalIntegerValue(forKey: "mark_index", in: rawJSON)
+        let confidence = extractDoubleValue(forKey: "confidence", in: rawJSON) ?? 1
+        let rationale = extractStringValue(forKey: "rationale", in: rawJSON) ?? "recovered partial payload"
+        let utteranceExcerpt = extractStringValue(forKey: "utterance_excerpt", in: rawJSON)
+        let highlightPhrases = extractStringArrayValue(forKey: "highlight_phrases", in: rawJSON)
+
+        return SlideCommand(
+            action: action,
+            targetSlide: targetSlide,
+            markIndex: markIndex,
+            confidence: confidence,
+            rationale: rationale,
+            utteranceExcerpt: utteranceExcerpt,
+            highlightPhrases: highlightPhrases
+        )
+    }
+
+    private func extractOptionalIntegerValue(forKey key: String, in text: String) -> Int? {
+        let pattern = #"""# + NSRegularExpression.escapedPattern(for: key) + #""\s*:\s*(null|-?\d+)"#
+        guard let rawValue = extractFirstRegexCapture(pattern: pattern, in: text) else {
+            return nil
+        }
+        if rawValue == "null" {
+            return nil
+        }
+        return Int(rawValue)
+    }
+
+    private func extractDoubleValue(forKey key: String, in text: String) -> Double? {
+        let pattern = #"""# + NSRegularExpression.escapedPattern(for: key) + #""\s*:\s*(-?\d+(?:\.\d+)?)"#
+        guard let rawValue = extractFirstRegexCapture(pattern: pattern, in: text) else {
+            return nil
+        }
+        return Double(rawValue)
+    }
+
+    private func extractStringValue(forKey key: String, in text: String) -> String? {
+        let pattern = #"""# + NSRegularExpression.escapedPattern(for: key) + #""\s*:\s*"((?:[^"\\]|\\.)*)""#
+        guard let rawValue = extractFirstRegexCapture(pattern: pattern, in: text) else {
+            return nil
+        }
+        return decodeJSONStringLiteral(rawValue)
+    }
+
+    private func extractStringArrayValue(forKey key: String, in text: String) -> [String]? {
+        let pattern = #"""# + NSRegularExpression.escapedPattern(for: key) + #""\s*:\s*\[(.*?)\]"#
+        guard let arrayBody = extractFirstRegexCapture(
+            pattern: pattern,
+            in: text,
+            options: [.dotMatchesLineSeparators]
+        ) else {
+            return nil
+        }
+
+        guard let regex = try? NSRegularExpression(pattern: #""((?:[^"\\]|\\.)*)""#) else {
+            return nil
+        }
+        let nsRange = NSRange(arrayBody.startIndex..<arrayBody.endIndex, in: arrayBody)
+        var values: [String] = []
+        for match in regex.matches(in: arrayBody, options: [], range: nsRange) {
+            guard
+                match.numberOfRanges > 1,
+                let valueRange = Range(match.range(at: 1), in: arrayBody),
+                let decoded = decodeJSONStringLiteral(String(arrayBody[valueRange]))
+            else {
+                continue
+            }
+            values.append(decoded)
+        }
+        return values
+    }
+
+    private func decodeJSONStringLiteral(_ literalBody: String) -> String? {
+        let wrapped = "\"\(literalBody)\""
+        guard let data = wrapped.data(using: .utf8) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(String.self, from: data)
+    }
+
+    private func extractFirstRegexCapture(
+        pattern: String,
+        in text: String,
+        options: NSRegularExpression.Options = []
+    ) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else {
+            return nil
+        }
+        let searchRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: searchRange) else {
+            return nil
+        }
+        guard match.numberOfRanges > 1, let valueRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return String(text[valueRange])
+    }
+
+    private func evaluateCommand(
+        _ command: SlideCommand,
+        source: String,
+        allowsAutoAdvance: Bool,
+        isPartial: Bool = false
+    ) async {
         defer {
             if isSessionActive, !isSpeechDetected {
                 sessionPhase = .listening
@@ -972,6 +1261,7 @@ final class AppViewModel: ObservableObject {
 
         let slideIndices = deck?.slideIndices ?? []
         let currentMarkableSegments = deck?.slide(at: currentSlideIndex)?.markableSegments() ?? []
+        let markingMode = settings.markingStrictnessMode
 
         let (gotoResolvedCommand, gotoRecoveryNote) = recoverGotoTargetIfMissing(
             command: command,
@@ -983,10 +1273,44 @@ final class AppViewModel: ObservableObject {
 
         let (resolvedCommand, markRecoveryNote) = recoverMarkIndexIfMissing(
             command: gotoResolvedCommand,
-            markableSegments: currentMarkableSegments
+            markableSegments: currentMarkableSegments,
+            allowHeuristicRecovery: !isPartial && markingMode.allowsHeuristicRecovery,
+            allowDeterministicFallback: !isPartial && markingMode.allowsDeterministicFallback
         )
         if let markRecoveryNote {
             appendLog("[RECOVERED][\(source)] \(markRecoveryNote)")
+        }
+
+        if let navigationRejectionReason = explicitNavigationRejectionReason(for: resolvedCommand) {
+            let commandSummary = summarize(command: resolvedCommand)
+            appendLog("[REJECTED][\(source)] \(commandSummary) | \(navigationRejectionReason)")
+            appendActivity(
+                "AI action rejected",
+                detail: "Reason: \(navigationRejectionReason)",
+                level: .warning
+            )
+            return
+        }
+
+        if isPartial && markingMode.requiresExplicitSpokenEvidence {
+            // Strict mode requires spoken evidence excerpts which are often incomplete
+            // in streamed delta fragments. Evaluate strict evidence only on final payloads.
+            return
+        }
+
+        if let markRejectionReason = explicitMarkRejectionReason(
+            for: resolvedCommand,
+            markableSegments: currentMarkableSegments,
+            mode: markingMode
+        ) {
+            let commandSummary = summarize(command: resolvedCommand)
+            appendLog("[REJECTED][\(source)] \(commandSummary) | \(markRejectionReason)")
+            appendActivity(
+                "AI mark rejected",
+                detail: "Reason: spoken evidence does not match segment",
+                level: .warning
+            )
+            return
         }
 
         let didApplyHighlights = applyHighlightPhrases(from: resolvedCommand, source: source)
@@ -994,7 +1318,8 @@ final class AppViewModel: ObservableObject {
         let policy = CommandPolicy(
             confidenceThreshold: settings.confidenceThreshold,
             cooldownSeconds: settings.cooldownSeconds,
-            dwellSeconds: settings.dwellSeconds
+            dwellSeconds: settings.dwellSeconds,
+            markCooldownSeconds: settings.realtimeMarkCooldownMilliseconds / 1_000
         )
 
         let decision = await safetyGate.evaluate(command: resolvedCommand, validSlideIndices: slideIndices, policy: policy)
@@ -1021,6 +1346,121 @@ final class AppViewModel: ObservableObject {
                 level: .warning
             )
         }
+    }
+
+    private func explicitNavigationRejectionReason(for command: SlideCommand) -> String? {
+        guard command.action.isNavigation else {
+            return nil
+        }
+
+        guard let utteranceExcerpt = command.utteranceExcerpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !utteranceExcerpt.isEmpty
+        else {
+            return "navigation requires non-empty utterance_excerpt"
+        }
+
+        let utteranceText = normalizedNavigationText(utteranceExcerpt)
+        guard !utteranceText.isEmpty else {
+            return "navigation requires non-empty utterance_excerpt"
+        }
+
+        return hasExplicitNavigationDirective(for: command.action, in: utteranceText)
+            ? nil
+            : "navigation phrase missing or not command-like"
+    }
+
+    private func normalizedNavigationText(_ text: String?) -> String {
+        guard let text else {
+            return ""
+        }
+        let trimmed = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !trimmed.isEmpty else {
+            return ""
+        }
+
+        let withoutPunctuation = trimmed.replacingOccurrences(
+            of: #"[^a-z0-9äöüß\s]"#,
+            with: " ",
+            options: .regularExpression
+        )
+        return withoutPunctuation.replacingOccurrences(
+            of: #"\s+"#,
+            with: " ",
+            options: .regularExpression
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func hasExplicitNavigationDirective(for action: SlideAction, in text: String) -> Bool {
+        guard !text.isEmpty else {
+            return false
+        }
+
+        switch action {
+        case .next:
+            return mentionsNextSlideDirective(in: text)
+        case .previous:
+            return mentionsPreviousSlideDirective(in: text)
+        case .goto:
+            if mentionsNextSlideDirective(in: text) || mentionsPreviousSlideDirective(in: text) {
+                return true
+            }
+            let indexedSlidePatterns = [
+                #"^(?:please\s+)?go\s+to\s+slide(?:s)?\s*(?:number\s*)?\d{1,3}(?:\s+please)?$"#,
+                #"^(?:please\s+)?slide(?:s)?\s*(?:number\s*)?\d{1,3}(?:\s+please)?$"#,
+                #"^(?:please\s+)?folie\s+\d{1,3}(?:\s+please)?$"#
+            ]
+            if indexedSlidePatterns.contains(where: { matchesNavigationPattern($0, in: text) }) {
+                return true
+            }
+
+            let edgeSlidePatterns = [
+                #"^(?:please\s+)?(?:first|start)\s+slide(?:\s+please)?$"#,
+                #"^(?:please\s+)?(?:last|final|end)\s+slide(?:\s+please)?$"#,
+                #"^(?:please\s+)?erste\s+folie(?:\s+please)?$"#,
+                #"^(?:please\s+)?letzte\s+folie(?:\s+please)?$"#
+            ]
+            if edgeSlidePatterns.contains(where: { matchesNavigationPattern($0, in: text) }) {
+                return true
+            }
+
+            return false
+        case .mark, .stay:
+            return false
+        }
+    }
+
+    private func mentionsNextSlideDirective(in text: String) -> Bool {
+        let commandPatterns = [
+            #"^(?:please\s+)?next(?:\s+slide)?(?:\s+please)?$"#,
+            #"^(?:please\s+)?go\s+to\s+next\s+slide(?:\s+please)?$"#,
+            #"^(?:please\s+)?advance(?:\s+slide)?(?:\s+please)?$"#,
+            #"^(?:please\s+)?forward(?:\s+slide)?(?:\s+please)?$"#,
+            #"^(?:please\s+)?n(?:ä|ae)chste\s+folie(?:\s+please)?$"#,
+            #"^(?:please\s+)?weiter(?:\s+please)?$"#
+        ]
+        return commandPatterns.contains(where: { matchesNavigationPattern($0, in: text) })
+    }
+
+    private func mentionsPreviousSlideDirective(in text: String) -> Bool {
+        let commandPatterns = [
+            #"^(?:please\s+)?previous(?:\s+slide)?(?:\s+please)?$"#,
+            #"^(?:please\s+)?go\s+to\s+previous\s+slide(?:\s+please)?$"#,
+            #"^(?:please\s+)?go\s+back(?:\s+please)?$"#,
+            #"^(?:please\s+)?back(?:\s+please)?$"#,
+            #"^(?:please\s+)?zur(?:ü|ue)ck(?:\s+please)?$"#,
+            #"^(?:please\s+)?vorherige\s+folie(?:\s+please)?$"#
+        ]
+        return commandPatterns.contains(where: { matchesNavigationPattern($0, in: text) })
+    }
+
+    private func matchesNavigationPattern(_ pattern: String, in text: String) -> Bool {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return false
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.firstMatch(in: text, options: [], range: range) != nil
     }
 
     private func applyAcceptedCommand(
@@ -1154,9 +1594,9 @@ final class AppViewModel: ObservableObject {
             let nonTitleIndices = Set(segments.filter { $0.kind != "title" }.map(\.index))
             let requiredIndicesForAdvance = nonTitleIndices.isEmpty ? validIndices : nonTitleIndices
             let allRequiredMarked = !requiredIndicesForAdvance.isEmpty && markedIndices.isSuperset(of: requiredIndicesForAdvance)
-            let lastSegmentIndex = segments.map(\.index).max()
-            let markedLastSegment = (lastSegmentIndex == markIndex)
-            if allRequiredMarked || markedLastSegment {
+            // Auto-advance must be triggered by a newly covered segment.
+            // Repeated marks on already-covered content must not move slides.
+            if allRequiredMarked && isNewMark {
                 guard allowsAutoAdvance else {
                     appendLog("[AUTO][\(source)] coverage reached; auto-advance deferred until final command in turn")
                     return
@@ -1172,9 +1612,7 @@ final class AppViewModel: ObservableObject {
                     }
                     currentSlideIndex = nextIndex
                     statusLine = "All segments marked on slide \(slideIndex): auto-advanced to \(nextIndex)"
-                    if markedLastSegment && !allRequiredMarked {
-                        appendLog("[AUTO][\(source)] last segment \(markIndex) marked on slide \(slideIndex); advanced to slide \(nextIndex)")
-                    } else if nonTitleIndices.isEmpty {
+                    if nonTitleIndices.isEmpty {
                         appendLog("[AUTO][\(source)] all \(validIndices.count) segments marked on slide \(slideIndex); advanced to slide \(nextIndex)")
                     } else {
                         appendLog("[AUTO][\(source)] all non-title segments marked on slide \(slideIndex); advanced to slide \(nextIndex)")
@@ -1186,9 +1624,7 @@ final class AppViewModel: ObservableObject {
                     pushContextUpdate(reason: "auto advance after full coverage")
                 } else {
                     statusLine = "All segments marked on final slide \(slideIndex)"
-                    if markedLastSegment && !allRequiredMarked {
-                        appendLog("[AUTO][\(source)] last segment \(markIndex) marked on final slide \(slideIndex)")
-                    } else if nonTitleIndices.isEmpty {
+                    if nonTitleIndices.isEmpty {
                         appendLog("[AUTO][\(source)] all \(validIndices.count) segments marked on final slide \(slideIndex)")
                     } else {
                         appendLog("[AUTO][\(source)] all non-title segments marked on final slide \(slideIndex)")
@@ -1213,6 +1649,10 @@ final class AppViewModel: ObservableObject {
         }
         if let markIndex = command.markIndex {
             parts.append("mark=\(markIndex)")
+        }
+        if let excerpt = command.utteranceExcerpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !excerpt.isEmpty {
+            parts.append("excerpt=\(excerpt)")
         }
         if let highlightPhrases = command.highlightPhrases, !highlightPhrases.isEmpty {
             parts.append("highlights=\(highlightPhrases.count)")
@@ -1378,14 +1818,36 @@ final class AppViewModel: ObservableObject {
             return (command, nil)
         }
 
-        let analysisText = [command.utteranceExcerpt, command.rationale]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            .lowercased()
+        let analysisText = normalizedNavigationText(command.utteranceExcerpt)
 
         guard !analysisText.isEmpty else {
             return (command, nil)
+        }
+
+        if mentionsNextSlideDirective(in: analysisText) {
+            let recoveredCommand = SlideCommand(
+                action: .next,
+                targetSlide: nil,
+                markIndex: nil,
+                confidence: command.confidence,
+                rationale: command.rationale,
+                utteranceExcerpt: command.utteranceExcerpt,
+                highlightPhrases: command.highlightPhrases
+            )
+            return (recoveredCommand, "Normalized goto to next from next-slide phrase")
+        }
+
+        if mentionsPreviousSlideDirective(in: analysisText) {
+            let recoveredCommand = SlideCommand(
+                action: .previous,
+                targetSlide: nil,
+                markIndex: nil,
+                confidence: command.confidence,
+                rationale: command.rationale,
+                utteranceExcerpt: command.utteranceExcerpt,
+                highlightPhrases: command.highlightPhrases
+            )
+            return (recoveredCommand, "Normalized goto to previous from previous-slide phrase")
         }
 
         let inferredTarget: Int?
@@ -1425,7 +1887,9 @@ final class AppViewModel: ObservableObject {
 
     private func recoverMarkIndexIfMissing(
         command: SlideCommand,
-        markableSegments: [SlideMarkSegment]
+        markableSegments: [SlideMarkSegment],
+        allowHeuristicRecovery: Bool = true,
+        allowDeterministicFallback: Bool = true
     ) -> (command: SlideCommand, recoveryNote: String?) {
         guard command.action == .mark else {
             return (command, nil)
@@ -1461,40 +1925,44 @@ final class AppViewModel: ObservableObject {
             return (recoveredCommand, "Inferred mark_index=\(inferredMarkIndex) from numeric reference")
         }
 
-        if let contentInferredIndex = inferMarkIndexFromContent(
-            command: command,
-            markableSegments: markableSegments
-        ) {
-            let recoveredCommand = SlideCommand(
-                action: .mark,
-                targetSlide: nil,
-                markIndex: contentInferredIndex,
-                confidence: command.confidence,
-                rationale: command.rationale,
-                utteranceExcerpt: command.utteranceExcerpt,
-                highlightPhrases: command.highlightPhrases
-            )
-            return (recoveredCommand, "Inferred mark_index=\(contentInferredIndex) from slide text match")
+        if allowHeuristicRecovery {
+            if let contentInferredIndex = inferMarkIndexFromContent(
+                command: command,
+                markableSegments: markableSegments
+            ) {
+                let recoveredCommand = SlideCommand(
+                    action: .mark,
+                    targetSlide: nil,
+                    markIndex: contentInferredIndex,
+                    confidence: command.confidence,
+                    rationale: command.rationale,
+                    utteranceExcerpt: command.utteranceExcerpt,
+                    highlightPhrases: command.highlightPhrases
+                )
+                return (recoveredCommand, "Inferred mark_index=\(contentInferredIndex) from slide text match")
+            }
         }
 
-        if !analysisText.isEmpty,
-           let hintedMarkIndex = inferMarkIndexFromRationaleHints(
-               analysisText,
-               markableSegments: markableSegments
-           ) {
-            let recoveredCommand = SlideCommand(
-                action: .mark,
-                targetSlide: nil,
-                markIndex: hintedMarkIndex,
-                confidence: command.confidence,
-                rationale: command.rationale,
-                utteranceExcerpt: command.utteranceExcerpt,
-                highlightPhrases: command.highlightPhrases
-            )
-            return (recoveredCommand, "Inferred mark_index=\(hintedMarkIndex) from rationale hint")
+        if allowHeuristicRecovery {
+            if !analysisText.isEmpty,
+               let hintedMarkIndex = inferMarkIndexFromRationaleHints(
+                   analysisText,
+                   markableSegments: markableSegments
+               ) {
+                let recoveredCommand = SlideCommand(
+                    action: .mark,
+                    targetSlide: nil,
+                    markIndex: hintedMarkIndex,
+                    confidence: command.confidence,
+                    rationale: command.rationale,
+                    utteranceExcerpt: command.utteranceExcerpt,
+                    highlightPhrases: command.highlightPhrases
+                )
+                return (recoveredCommand, "Inferred mark_index=\(hintedMarkIndex) from rationale hint")
+            }
         }
 
-        if let fallbackIndex = fallbackMarkIndex(from: markableSegments) {
+        if allowDeterministicFallback, let fallbackIndex = fallbackMarkIndex(from: markableSegments) {
             let recoveredCommand = SlideCommand(
                 action: .mark,
                 targetSlide: nil,
@@ -1507,6 +1975,57 @@ final class AppViewModel: ObservableObject {
             return (recoveredCommand, "Inferred mark_index=\(fallbackIndex) from deterministic fallback")
         }
         return (command, nil)
+    }
+
+    private func explicitMarkRejectionReason(
+        for command: SlideCommand,
+        markableSegments: [SlideMarkSegment],
+        mode: MarkingStrictnessMode
+    ) -> String? {
+        guard command.action == .mark else {
+            return nil
+        }
+        guard mode.requiresExplicitSpokenEvidence else {
+            return nil
+        }
+
+        guard let markIndex = command.markIndex else {
+            return "strict mark mode requires explicit mark_index"
+        }
+        guard let segment = markableSegments.first(where: { $0.index == markIndex }) else {
+            return "strict mark mode could not resolve current-slide segment for mark_index"
+        }
+        guard let utteranceExcerpt = command.utteranceExcerpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !utteranceExcerpt.isEmpty
+        else {
+            return "strict mark mode requires non-empty utterance_excerpt"
+        }
+        guard hasStrongSpokenMarkEvidence(utteranceExcerpt, segmentText: segment.text) else {
+            return "strict mark mode requires lexical overlap between speech excerpt and target segment"
+        }
+        return nil
+    }
+
+    private func hasStrongSpokenMarkEvidence(_ utteranceExcerpt: String, segmentText: String) -> Bool {
+        let normalizedExcerpt = normalizeForMarkMatching(utteranceExcerpt)
+        let normalizedSegment = normalizeForMarkMatching(segmentText)
+
+        if normalizedExcerpt.count >= 6,
+           (normalizedSegment.contains(normalizedExcerpt) || normalizedExcerpt.contains(normalizedSegment)) {
+            return true
+        }
+
+        let excerptTokens = Set(tokenSet(for: utteranceExcerpt).filter { !$0.isEmpty })
+        let segmentTokens = Set(tokenSet(for: segmentText).filter { !$0.isEmpty })
+        let overlap = excerptTokens.intersection(segmentTokens)
+        if overlap.count >= 2 {
+            return true
+        }
+        if overlap.contains(where: { $0.count >= 6 }) {
+            return true
+        }
+
+        return false
     }
 
     private func mentionsFirstSlide(in text: String) -> Bool {
@@ -1885,11 +2404,19 @@ final class AppViewModel: ObservableObject {
         guard isSessionActive else { return }
 
         let instructions = deck.instructionBlock(currentSlideIndex: currentSlideIndex)
+        let manualCommitIntervalMilliseconds = Int(settings.realtimeSilenceDurationMilliseconds.rounded())
+        let maxOutputTokens = Int(settings.realtimeMaxOutputTokens.rounded())
         Task {
             do {
-                try await bridge.updateInstructions(instructions)
+                try await bridge.updateInstructions(
+                    instructions,
+                    manualCommitIntervalMilliseconds: manualCommitIntervalMilliseconds,
+                    maxOutputTokens: maxOutputTokens
+                )
                 if shouldLogResult {
-                    appendLog("Context updated for slide \(currentSlideIndex) (\(reason))")
+                    appendLog(
+                        "Context updated for slide \(currentSlideIndex) (\(reason)) [commit_interval=\(manualCommitIntervalMilliseconds)ms, max_tokens=\(maxOutputTokens)]"
+                    )
                 }
             } catch {
                 if shouldLogResult {
@@ -1897,6 +2424,11 @@ final class AppViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func applyRealtimeTimingUpdateIfNeeded() {
+        guard isSessionActive else { return }
+        pushContextUpdate(reason: "realtime timing changed")
     }
 
     private func isCurrentEventArrowKeyNavigation() -> Bool {

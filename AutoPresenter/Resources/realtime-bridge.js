@@ -5,6 +5,25 @@
     pc: null,
     dc: null,
     localStream: null,
+    manual: {
+      commitIntervalMs: 260,
+      commitTimer: null,
+      monitorTimer: null,
+      audioContext: null,
+      sourceNode: null,
+      analyser: null,
+      analyserData: null,
+      speechActive: false,
+      speechStartedAt: 0,
+      lastSpeechAt: 0,
+      speechTailMs: 260,
+      minSpeechLeadMs: 140,
+      rmsThreshold: 0.006,
+      pendingResponse: false,
+      pendingSince: 0,
+      responseTimeoutMs: 5000,
+      maxOutputTokens: 220,
+    },
   };
 
   const commandEntrySchema = {
@@ -32,16 +51,17 @@
       },
       rationale: {
         type: "string",
-        description: "Short factual explanation for the selected action (4-10 words)",
+        description: "Short factual explanation for the selected action (2-6 words)",
       },
       utterance_excerpt: {
         type: ["string", "null"],
-        description: "Optional exact excerpt of the triggering utterance (max 10 words)",
+        description:
+          "Exact excerpt of the triggering utterance (max 6 words); required for navigation actions and null allowed otherwise",
       },
       highlight_phrases: {
         type: "array",
         items: { type: "string" },
-        maxItems: 5,
+        maxItems: 3,
         description: "Optional phrases from current slide to highlight based on what was just said; [] when none",
       },
     },
@@ -70,6 +90,10 @@
 
   const forwardedEventTypes = new Set([
     "error",
+    "response.created",
+    "response.done",
+    "response.function_call_arguments.delta",
+    "response.function_call_arguments.done",
     "input_audio_buffer.speech_started",
     "input_audio_buffer.speech_stopped",
     "response.output_item.done",
@@ -87,7 +111,228 @@
     post("log", { level, message, data });
   }
 
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function configureManualMode(config) {
+    const manual = state.manual;
+    const requestedCommitIntervalMs = Number(config?.manualCommitIntervalMs);
+    const requestedMaxOutputTokens = Number(config?.maxOutputTokens);
+
+    if (Number.isFinite(requestedCommitIntervalMs)) {
+      manual.commitIntervalMs = clamp(Math.round(requestedCommitIntervalMs), 120, 1000);
+    }
+
+    if (Number.isFinite(requestedMaxOutputTokens)) {
+      manual.maxOutputTokens = clamp(Math.round(requestedMaxOutputTokens), 80, 420);
+    }
+  }
+
+  function emitLocalSpeechState(active, rms = 0) {
+    const type = active
+      ? "input_audio_buffer.speech_started"
+      : "input_audio_buffer.speech_stopped";
+    post("event", {
+      event: {
+        type,
+        source: "local_manual",
+        rms,
+      },
+    });
+  }
+
+  function tickLocalSpeechMonitor() {
+    const manual = state.manual;
+    if (!manual.analyser || !manual.analyserData) {
+      return;
+    }
+
+    manual.analyser.getFloatTimeDomainData(manual.analyserData);
+    let energy = 0;
+    for (let i = 0; i < manual.analyserData.length; i += 1) {
+      const sample = manual.analyserData[i];
+      energy += sample * sample;
+    }
+
+    const rms = Math.sqrt(energy / manual.analyserData.length);
+    const now = Date.now();
+
+    if (rms >= manual.rmsThreshold) {
+      manual.lastSpeechAt = now;
+      if (!manual.speechActive) {
+        manual.speechActive = true;
+        manual.speechStartedAt = now;
+        emitLocalSpeechState(true, rms);
+      }
+      return;
+    }
+
+    if (manual.speechActive && now - manual.lastSpeechAt > manual.speechTailMs) {
+      manual.speechActive = false;
+      emitLocalSpeechState(false, rms);
+    }
+  }
+
+  function requestManualResponseCycle() {
+    if (!state.dc || state.dc.readyState !== "open") {
+      return;
+    }
+
+    const manual = state.manual;
+    const now = Date.now();
+
+    if (manual.pendingResponse) {
+      if (now - manual.pendingSince < manual.responseTimeoutMs) {
+        return;
+      }
+      manual.pendingResponse = false;
+      manual.pendingSince = 0;
+      log("warn", "Manual response timeout reached; resetting cycle");
+    }
+
+    const speechWindowOpen =
+      manual.speechActive ||
+      (manual.lastSpeechAt > 0 && now - manual.lastSpeechAt <= manual.speechTailMs);
+    if (!speechWindowOpen) {
+      return;
+    }
+
+    if (
+      manual.speechActive &&
+      manual.speechStartedAt > 0 &&
+      now - manual.speechStartedAt < manual.minSpeechLeadMs
+    ) {
+      return;
+    }
+
+    if (!sendEvent({ type: "input_audio_buffer.commit" })) {
+      return;
+    }
+
+    const didSendCreate = sendEvent({
+      type: "response.create",
+      response: {
+        tool_choice: "required",
+        max_output_tokens: manual.maxOutputTokens,
+      },
+    });
+
+    if (!didSendCreate) {
+      return;
+    }
+
+    manual.pendingResponse = true;
+    manual.pendingSince = now;
+  }
+
+  function handleInternalServerEvent(event) {
+    const manual = state.manual;
+    if (!event || typeof event !== "object") {
+      return;
+    }
+
+    if (event.type === "response.created") {
+      manual.pendingResponse = true;
+      manual.pendingSince = Date.now();
+      return;
+    }
+
+    if (event.type === "response.done" || event.type === "error") {
+      manual.pendingResponse = false;
+      manual.pendingSince = 0;
+    }
+  }
+
+  function stopManualMode() {
+    const manual = state.manual;
+
+    if (manual.commitTimer) {
+      window.clearInterval(manual.commitTimer);
+      manual.commitTimer = null;
+    }
+
+    if (manual.monitorTimer) {
+      window.clearInterval(manual.monitorTimer);
+      manual.monitorTimer = null;
+    }
+
+    if (manual.sourceNode) {
+      try {
+        manual.sourceNode.disconnect();
+      } catch (_) {
+        // Ignore disconnect errors during teardown.
+      }
+      manual.sourceNode = null;
+    }
+
+    if (manual.audioContext) {
+      try {
+        void manual.audioContext.close();
+      } catch (_) {
+        // Ignore close errors during teardown.
+      }
+      manual.audioContext = null;
+    }
+
+    manual.analyser = null;
+    manual.analyserData = null;
+    manual.speechActive = false;
+    manual.speechStartedAt = 0;
+    manual.lastSpeechAt = 0;
+    manual.pendingResponse = false;
+    manual.pendingSince = 0;
+  }
+
+  function startManualMode(stream, config) {
+    stopManualMode();
+    configureManualMode(config);
+
+    const manual = state.manual;
+    manual.commitTimer = window.setInterval(
+      requestManualResponseCycle,
+      manual.commitIntervalMs
+    );
+
+    try {
+      const audioContext = new window.AudioContext();
+      const sourceNode = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.2;
+      sourceNode.connect(analyser);
+
+      manual.audioContext = audioContext;
+      manual.sourceNode = sourceNode;
+      manual.analyser = analyser;
+      manual.analyserData = new Float32Array(analyser.fftSize);
+      manual.monitorTimer = window.setInterval(tickLocalSpeechMonitor, 40);
+
+      if (audioContext.state === "suspended") {
+        void audioContext.resume().catch((error) => {
+          log("warn", `Manual speech monitor resume failed: ${error}`);
+        });
+      }
+
+      log("info", "Manual realtime mode enabled", {
+        commit_interval_ms: manual.commitIntervalMs,
+        rms_threshold: manual.rmsThreshold,
+      });
+    } catch (error) {
+      // Fallback mode: keep cycling without local speech gating.
+      manual.speechActive = true;
+      manual.speechStartedAt = Date.now();
+      manual.lastSpeechAt = Date.now();
+      log("warn", "Manual speech monitor unavailable; using timer-only commit loop", {
+        error: String(error),
+        commit_interval_ms: manual.commitIntervalMs,
+      });
+    }
+  }
+
   async function stopSession() {
+    stopManualMode();
+
     if (state.dc) {
       try {
         state.dc.close();
@@ -114,7 +359,7 @@
     post("connection", { state: "closed" });
   }
 
-  function defaultSessionUpdate(instructions, turnDetection) {
+  function defaultSessionUpdate(instructions, maxOutputTokens) {
     return {
       type: "realtime",
       output_modalities: ["text"],
@@ -123,15 +368,10 @@
       tools: [commandToolSchema],
       audio: {
         input: {
-          turn_detection: {
-            type: turnDetection?.type ?? "server_vad",
-            create_response: turnDetection?.create_response ?? true,
-            interrupt_response: turnDetection?.interrupt_response ?? true,
-            silence_duration_ms: turnDetection?.silence_duration_ms ?? 180,
-          },
+          turn_detection: null,
         },
       },
-      max_output_tokens: 420,
+      max_output_tokens: maxOutputTokens ?? 220,
     };
   }
 
@@ -211,8 +451,13 @@
 
     dc.onopen = () => {
       log("info", "Realtime data channel opened");
-      const sessionUpdate = defaultSessionUpdate(config.instructions, config.turnDetection);
+      configureManualMode(config);
+      const sessionUpdate = defaultSessionUpdate(
+        config.instructions,
+        state.manual.maxOutputTokens
+      );
       sendEvent({ type: "session.update", session: sessionUpdate });
+      startManualMode(stream, config);
     };
 
     dc.onmessage = (event) => {
@@ -223,6 +468,7 @@
         }
 
         const parsed = JSON.parse(rawPayload);
+        handleInternalServerEvent(parsed);
         if (shouldForwardServerEvent(parsed)) {
           post("event", { event: parsed });
         }
@@ -269,8 +515,20 @@
       return;
     }
 
-    const sessionUpdate = defaultSessionUpdate(payload.instructions);
+    configureManualMode(payload);
+    const sessionUpdate = defaultSessionUpdate(
+      payload.instructions,
+      state.manual.maxOutputTokens
+    );
     sendEvent({ type: "session.update", session: sessionUpdate });
+
+    if (state.manual.commitTimer) {
+      window.clearInterval(state.manual.commitTimer);
+      state.manual.commitTimer = window.setInterval(
+        requestManualResponseCycle,
+        state.manual.commitIntervalMs
+      );
+    }
   }
 
   window.AutoPresenter = {
